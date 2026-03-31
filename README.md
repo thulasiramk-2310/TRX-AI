@@ -6,7 +6,6 @@
 
 ![CI](https://img.shields.io/github/actions/workflow/status/thulasiramk-2310/TRX-AI/ci.yml?branch=main&label=CI)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![License](https://img.shields.io/github/license/thulasiramk-2310/TRX-AI)
 
 TRX-AI is a CLI-first, local-LLM powered code intelligence system that combines hybrid intent detection and multi-agent reasoning to produce structured, actionable outputs for debugging and code review.
 
@@ -52,14 +51,6 @@ Metrics:
 - Fix Quality
 - Avg Response Time
 - Completeness
-
-Graph:
-
-![Accuracy Graph](./assets/trx_ai_accuracy_graph.png)
-
-Screenshot:
-
-![Evaluation Output](./assets/evaluation_output.png)
 
 Detailed methodology is documented in [docs/evaluation.md](docs/evaluation.md).
 
@@ -109,19 +100,9 @@ trx-ai/
 │   ├── architecture.md
 │   ├── evaluation.md
 │   └── design.md
-├── assets/
-│   ├── trx_ai_accuracy_graph.png
-│   └── evaluation_output.png
 ├── README.md
-├── CONTRIBUTING.md
 ├── requirements.txt
-├── LICENSE
-└── .github/
-    ├── workflows/
-    │   └── ci.yml
-    └── ISSUE_TEMPLATE/
-        ├── bug_report.md
-        └── feature_request.md
+└── .gitignore
 ```
 
 ## Roadmap
@@ -131,11 +112,3 @@ trx-ai/
 - More evaluation cases across security/performance domains
 - Better visualization and dashboard export
 - Plugin-ready architecture for custom agents
-
-## Contributing
-
-Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening pull requests.
-
-## License
-
-This project is licensed under the MIT License. See [LICENSE](LICENSE).
