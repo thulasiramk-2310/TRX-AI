@@ -45,6 +45,22 @@ SUPPORTED_CODE_SUFFIXES = {
 }
 
 
+def _build_cli_prompt(console: Console, mode: str) -> str:
+    cwd_name = Path.cwd().name or "/"
+    cwd_label = "WORKSPACE" if cwd_name.lower() == "trx-ai" else cwd_name
+    mode_label = mode.upper()
+
+    if not console.color_system:
+        return f"trx-ai[{mode}] {cwd_name} >"
+
+    return (
+        "[bold #0f172a on #86efac] TRX-AI [/]"
+        f"[bold #e2e8f0 on #0f172a] {cwd_label} [/]"
+        f"[bold #0f172a on #67e8f9] {mode_label} [/]"
+        "[#67e8f9][/] [bold #22c55e]❯[/]"
+    )
+
+
 def _loader_text_for_prompt(user_input: str) -> str:
     normalized = user_input.strip().lower()
     if normalized.startswith("review "):
@@ -118,7 +134,7 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
 
     while True:
         try:
-            user_input = prompt("trx-ai >").strip()
+            user_input = prompt(_build_cli_prompt(console, mode)).strip()
         except (KeyboardInterrupt, EOFError):
             _shutdown_watchers(active_watchers)
             console.print("\nExiting Reality Debugger. Goodbye!", style="cyan")
