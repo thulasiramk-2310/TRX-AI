@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import re
 from typing import Any
 
@@ -36,26 +37,136 @@ class OutputFormatter:
 
     @staticmethod
     def structured_text(analysis: dict[str, Any]) -> str:
+        def items(key: str, fallback: str) -> list[str]:
+            return OutputFormatter._section_items(analysis, key, fallback)
+
+        def code_mode() -> bool:
+            intent = str(analysis.get("intent", "")).lower()
+            return intent == "review" or bool(str(analysis.get("fixed_code", "")).strip())
+
+        def complexity_notes() -> list[str]:
+            pool = []
+            for section_key in ("predictions", "improvements", "debug_analysis"):
+                val = analysis.get(section_key, [])
+                if isinstance(val, list):
+                    pool.extend(str(v).strip() for v in val if str(v).strip())
+                elif isinstance(val, str) and val.strip():
+                    pool.append(val.strip())
+            selected = []
+            for line in pool:
+                low = line.lower()
+                if "o(" in low or "complexity" in low or "exponential" in low or "quadratic" in low:
+                    selected.append(line)
+            if selected:
+                return selected[:4]
+            return []
+
+        def optimization_approaches() -> list[str]:
+            pool = []
+            for section_key in ("improvements", "predictions"):
+                val = analysis.get(section_key, [])
+                if isinstance(val, list):
+                    pool.extend(str(v).strip() for v in val if str(v).strip())
+                elif isinstance(val, str) and val.strip():
+                    pool.append(val.strip())
+            selected = []
+            for line in pool:
+                low = line.lower()
+                if any(
+                    marker in low
+                    for marker in (
+                        "optimiz", "memo", "cache", "reduce", "refactor", "improve performance",
+                        "time complexity", "space complexity", "early exit", "index bound",
+                    )
+                ):
+                    selected.append(line)
+            deduped = []
+            seen = set()
+            for line in selected:
+                key = line.lower()
+                if key not in seen:
+                    deduped.append(line)
+                    seen.add(key)
+            return deduped[:5]
+
+        def changed_lines_summary() -> list[str]:
+            original = str(analysis.get("original_code", "")).strip()
+            fixed = str(analysis.get("fixed_code", "")).strip()
+            if not original or not fixed:
+                return []
+            old_lines = original.splitlines()
+            new_lines = fixed.splitlines()
+            matcher = difflib.SequenceMatcher(a=old_lines, b=new_lines)
+            out: list[str] = []
+            for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                if tag == "equal":
+                    continue
+                old_snippet = " | ".join(line.strip() for line in old_lines[i1:i2] if line.strip())[:100]
+                new_snippet = " | ".join(line.strip() for line in new_lines[j1:j2] if line.strip())[:100]
+                out.append(f"OLD: {old_snippet or '<none>'}")
+                out.append(f"NEW: {new_snippet or '<none>'}")
+                if len(out) >= 8:
+                    break
+            reason = ""
+            final_insight = analysis.get("final_insight", [])
+            if isinstance(final_insight, list) and final_insight:
+                reason = str(final_insight[0]).strip()
+            elif isinstance(final_insight, str):
+                reason = final_insight.strip()
+            if reason:
+                out.insert(0, f"Reason: {reason}")
+            return out
+
         lines: list[str] = []
 
         lines.append("[DEBUG ANALYSIS]")
-        for item in OutputFormatter._section_items(analysis, "debug_analysis", "No debug analysis available"):
+        for item in items("debug_analysis", "No debug analysis available"):
             lines.append(f"- {item}")
 
         lines.append("")
         lines.append("[IMPROVEMENTS]")
-        for item in OutputFormatter._section_items(analysis, "improvements", "No improvements available"):
+        for item in items("improvements", "No improvements available"):
             lines.append(f"- {item}")
 
         lines.append("")
         lines.append("[PREDICTIONS]")
-        for item in OutputFormatter._section_items(analysis, "predictions", "No predictions available"):
+        for item in items("predictions", "No predictions available"):
             lines.append(f"- {item}")
 
         lines.append("")
         lines.append("[FINAL INSIGHT]")
-        for item in OutputFormatter._section_items(analysis, "final_insight", "Prioritize one corrective action now"):
+        for item in items("final_insight", "Prioritize one corrective action now"):
             lines.append(f"- {item}")
+
+        if code_mode():
+            changes = changed_lines_summary()
+            if changes:
+                lines.append("")
+                lines.append("[CHANGES APPLIED]")
+                for item in changes:
+                    lines.append(f"- {item}")
+
+            complexity = complexity_notes()
+            if complexity:
+                lines.append("")
+                lines.append("[CODE COMPLEXITY]")
+                for item in complexity:
+                    lines.append(f"- {item}")
+
+            approaches = optimization_approaches()
+            if approaches:
+                lines.append("")
+                lines.append("[OPTIMIZATION APPROACHES]")
+                for item in approaches:
+                    lines.append(f"- {item}")
+
+            fixed_code = str(analysis.get("fixed_code", "")).strip()
+            if fixed_code:
+                lines.append("")
+                lines.append("[LLM FIXED CODE]")
+                lines.append("```")
+                lines.extend(fixed_code.splitlines())
+                lines.append("```")
 
         lines.append("")
         lines.append("[CONFIDENCE SCORE]")
@@ -96,10 +207,14 @@ class OutputFormatter:
 
         def with_line_hint(value: str) -> str:
             text = compact_line(value)
-            match = re.search(r"\bline(?:s)?\s*(\d+(?:\s*[-–]\s*\d+)?)\b[:\-]?\s*(.*)", text, flags=re.IGNORECASE)
+            match = re.search(
+                r"\bline(?:s)?\s*(\d+(?:\s*[-–]\s*\d+)?)\b\)?\s*[:\-]?\s*(.*)",
+                text,
+                flags=re.IGNORECASE,
+            )
             if match:
                 line_info = match.group(1).replace(" ", "")
-                message = match.group(2).strip()
+                message = re.sub(r"^[\)\:\-\s]+", "", match.group(2)).strip()
                 if not message:
                     return f"[Line {line_info}]"
                 return f"[Line {line_info}] {message}"
@@ -197,6 +312,11 @@ class OutputFormatter:
         content.append("\n")
         content.append(f"intent: {intent}\n", style="dim")
         content.append(f"source: {source}", style="dim")
+        statuses = analysis.get("system_status", [])
+        if isinstance(statuses, list) and statuses:
+            preview = ", ".join(str(item) for item in statuses[:5])
+            content.append("\n")
+            content.append(f"status: {preview}", style="dim")
 
         panel = Panel(
             content,
