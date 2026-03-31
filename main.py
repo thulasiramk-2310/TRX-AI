@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import argparse
+import difflib
+import json
 import textwrap
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -12,6 +16,7 @@ from rich.console import Console
 from rich.live import Live
 from rich.prompt import Prompt
 from rich.spinner import Spinner
+from rich.text import Text
 
 from analyzer import RealityAnalyzer
 from config import AppConfig
@@ -33,6 +38,11 @@ LOGO_LINES = [
 ASCII_LOGO_LINES = [
     "TRX-AI",
 ]
+RUN_HISTORY_PATH = Path("sessions") / "run_history.jsonl"
+SUPPORTED_CODE_SUFFIXES = {
+    ".py", ".js", ".ts", ".java", ".c", ".cpp", ".cc", ".cs",
+    ".go", ".rs", ".swift", ".kt", ".php", ".sql", ".rb",
+}
 
 
 def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
@@ -73,7 +83,7 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
         command = user_input.lower()
         command_parts = user_input.split()
 
-        if command == "exit":
+        if command in {"exit", "quit"}:
             _shutdown_watchers(active_watchers)
             console.print("Exiting Reality Debugger. Goodbye!", style="cyan")
             break
@@ -200,9 +210,12 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
             try:
                 code_blob = _load_review_target(target)
                 result = analyzer.analyze_code_multi_agent(code_blob)
+                result["original_code"] = code_blob[:20000]
+                result["review_target"] = target
                 total_analyses += 1
                 formatter.render(result, mode, total_runs=total_analyses)
                 history.add_entry(f"review {target}", "review", result)
+                _append_run_history(f"review {target}", "review", result)
                 _print_dashboard(console, config, total_analyses, analyzer)
             except FileNotFoundError:
                 _print_error(console, f"File or folder not found: {target}")
@@ -224,17 +237,23 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
             try:
                 if not target_path.exists() or not target_path.is_file():
                     raise FileNotFoundError(target)
-                if target_path.suffix.lower() != ".py":
-                    raise ValueError("Unsupported format. Use a .py file for fix.")
+                if target_path.suffix.lower() not in SUPPORTED_CODE_SUFFIXES:
+                    raise ValueError(
+                        "Unsupported format. Use a supported code file: "
+                        + ", ".join(sorted(SUPPORTED_CODE_SUFFIXES))
+                    )
 
                 original_code = target_path.read_text(encoding="utf-8")
                 if not original_code.strip():
                     raise ValueError(f"Empty file: {target_path}")
 
                 result = analyzer.analyze_code_multi_agent(original_code)
+                result["original_code"] = original_code[:20000]
+                result["review_target"] = target
                 total_analyses += 1
                 formatter.render(result, mode, total_runs=total_analyses)
                 history.add_entry(f"fix {target}", "fix", result)
+                _append_run_history(f"fix {target}", "fix", result)
 
                 fixed_code = str(result.get("fixed_code", "")).strip()
                 if not fixed_code:
@@ -242,13 +261,26 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                     _print_dashboard(console, config, total_analyses, analyzer)
                     continue
 
+                _print_fix_diff_preview(console, str(target_path), original_code, fixed_code)
                 confirm = prompt("Apply fix? (y/n)").strip().lower()
                 if confirm not in {"y", "yes"}:
                     console.print("Fix canceled.", style="yellow")
                     _print_dashboard(console, config, total_analyses, analyzer)
                     continue
 
-                fixed_path = apply_code_fix(str(target_path), fixed_code)
+                reason = ""
+                final_insight = result.get("final_insight", [])
+                if isinstance(final_insight, list) and final_insight:
+                    reason = str(final_insight[0])
+                elif isinstance(final_insight, str):
+                    reason = final_insight
+
+                fixed_path = apply_code_fix(
+                    str(target_path),
+                    fixed_code,
+                    reason=reason,
+                    original_code=original_code,
+                )
                 console.print(f"[OK] Fixed file saved as: {fixed_path}", style="green")
                 _print_dashboard(console, config, total_analyses, analyzer)
             except FileNotFoundError:
@@ -303,6 +335,7 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                 total_analyses += 1
             formatter.render(result, mode, total_runs=total_analyses)
             history.add_entry(user_input, mode, result)
+            _append_run_history(user_input, mode, result)
             _print_dashboard(console, config, total_analyses, analyzer)
         except ValueError as exc:
             _print_error(console, str(exc))
@@ -314,14 +347,65 @@ def _print_error(console: Console, message: str) -> None:
     console.print(f"Error: {message}", style="red")
 
 
+def _print_fix_diff_preview(
+    console: Console,
+    target_path: str,
+    original_code: str,
+    fixed_code: str,
+) -> None:
+    encoding = (getattr(getattr(console, "file", None), "encoding", "") or "").lower()
+    terminal_codec = "cp1252" if encoding in {"cp1252", "windows-1252"} else ("ascii" if encoding == "ascii" else "")
+
+    def safe_terminal_text(value: str) -> str:
+        text = str(value)
+        if not terminal_codec:
+            return text
+        return text.encode(terminal_codec, errors="replace").decode(terminal_codec, errors="replace")
+
+    console.print(f"Fix preview for: {target_path}", style="cyan")
+    console.print("Red = removed, Green = added", style="dim")
+
+    diff_lines = list(
+        difflib.unified_diff(
+            original_code.splitlines(),
+            fixed_code.splitlines(),
+            fromfile=f"{target_path} (current)",
+            tofile=f"{target_path} (fixed)",
+            lineterm="",
+            n=3,
+        )
+    )
+    if not diff_lines:
+        console.print("No code differences detected.", style="yellow")
+        return
+
+    max_preview_lines = 220
+    for raw in diff_lines[:max_preview_lines]:
+        line = safe_terminal_text(raw[:1000])
+        text = Text(line)
+        if line.startswith("+") and not line.startswith("+++"):
+            text.stylize("green")
+        elif line.startswith("-") and not line.startswith("---"):
+            text.stylize("red")
+        elif line.startswith("@@"):
+            text.stylize("cyan")
+        else:
+            text.stylize("dim")
+        console.print(text)
+    if len(diff_lines) > max_preview_lines:
+        console.print(f"... diff truncated ({len(diff_lines) - max_preview_lines} more lines)", style="dim")
+
+
 def _load_review_target(target: str) -> str:
     path = Path(target)
     if not path.exists():
         raise FileNotFoundError(target)
 
     if path.is_file():
-        if path.suffix.lower() != ".py":
-            raise ValueError("Unsupported format. Use a .py file or a folder containing .py files.")
+        if path.suffix.lower() not in SUPPORTED_CODE_SUFFIXES:
+            raise ValueError(
+                "Unsupported format. Use a supported code file or a folder containing supported code files."
+            )
         content = path.read_text(encoding="utf-8")
         if not content.strip():
             raise ValueError(f"Empty file: {path}")
@@ -330,12 +414,15 @@ def _load_review_target(target: str) -> str:
     if not path.is_dir():
         raise IsADirectoryError(target)
 
-    py_files = sorted(path.rglob("*.py"))
-    if not py_files:
-        raise ValueError("No .py files found in folder.")
+    code_files = sorted(
+        file_path for file_path in path.rglob("*")
+        if file_path.is_file() and file_path.suffix.lower() in SUPPORTED_CODE_SUFFIXES
+    )
+    if not code_files:
+        raise ValueError("No supported code files found in folder.")
 
     chunks: list[str] = []
-    for file_path in py_files:
+    for file_path in code_files:
         content = file_path.read_text(encoding="utf-8")
         if not content.strip():
             continue
@@ -343,19 +430,180 @@ def _load_review_target(target: str) -> str:
         chunks.append(f"# FILE: {relative_name}\n\n{content}")
 
     if not chunks:
-        raise ValueError("All discovered .py files are empty.")
+        raise ValueError("All discovered supported code files are empty.")
 
     return "\n\n".join(chunks)
 
 
-def apply_code_fix(original_path: str, fixed_code: str) -> Path:
+def _comment_style_for_path(path: Path) -> tuple[str, str]:
+    ext = path.suffix.lower()
+    if ext in {".py", ".sh", ".rb", ".yaml", ".yml", ".toml"}:
+        return "# ", ""
+    if ext in {".js", ".ts", ".java", ".c", ".cpp", ".cc", ".cs", ".go", ".rs", ".swift", ".kt", ".php"}:
+        return "// ", ""
+    if ext in {".sql"}:
+        return "-- ", ""
+    if ext in {".html", ".xml"}:
+        return "<!-- ", " -->"
+    return "# ", ""
+
+
+def _build_fix_comment_header(
+    *,
+    destination_path: Path,
+    original_code: str,
+    fixed_code: str,
+    reason: str,
+    max_items: int = 8,
+) -> str:
+    """Builds a compact comment header that explains key code changes."""
+    old_lines = original_code.splitlines()
+    new_lines = fixed_code.splitlines()
+    matcher = difflib.SequenceMatcher(a=old_lines, b=new_lines)
+
+    prefix, suffix = _comment_style_for_path(destination_path)
+
+    def line(text: str) -> str:
+        return f"{prefix}{text}{suffix}".rstrip()
+
+    items: list[str] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        old_snippet = " | ".join(line.strip() for line in old_lines[i1:i2] if line.strip())[:120]
+        new_snippet = " | ".join(line.strip() for line in new_lines[j1:j2] if line.strip())[:120]
+        if not old_snippet and not new_snippet:
+            continue
+        items.append(line(f"- OLD: {old_snippet or '<none>'}"))
+        items.append(line(f"+ NEW: {new_snippet or '<none>'}"))
+        if len(items) >= max_items * 2:
+            break
+
+    header_lines = [
+        line("TRX-AI CHANGE SUMMARY"),
+        line(f"Reason: {reason.strip() or 'Automated reliability and correctness improvements.'}"),
+    ]
+    if items:
+        header_lines.append(line("Changes:"))
+        header_lines.extend(items)
+    else:
+        header_lines.append(line("Changes: Minor structural updates applied."))
+    header_lines.append("")
+    return "\n".join(header_lines)
+
+
+def apply_code_fix(
+    original_path: str,
+    fixed_code: str,
+    *,
+    reason: str = "",
+    original_code: str | None = None,
+) -> Path:
     source = Path(original_path)
     if not source.exists() or not source.is_file():
         raise FileNotFoundError(original_path)
 
-    destination = source.with_name(f"{source.stem}_fixed.py")
-    destination.write_text(fixed_code, encoding="utf-8")
+    destination = source.with_name(f"{source.stem}_fixed{source.suffix or '.txt'}")
+    base_original = original_code if original_code is not None else source.read_text(encoding="utf-8")
+    comment_header = _build_fix_comment_header(
+        destination_path=destination,
+        original_code=base_original,
+        fixed_code=fixed_code,
+        reason=reason,
+    )
+    destination.write_text(comment_header + fixed_code, encoding="utf-8")
     return destination
+
+
+def _append_run_history(user_input: str, mode: str, result: dict[str, Any]) -> None:
+    score = result.get("confidence")
+    if score is None:
+        if "confidence_score" in result:
+            score = float(result.get("confidence_score", 0.0)) / 100.0
+        else:
+            score = float(result.get("intent_confidence", 0.0))
+    record = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "input": user_input,
+        "mode": mode,
+        "output": str(result.get("analysis_text", result.get("chat_response", "")))[:2000],
+        "score": float(score),
+        "steps": result.get("system_status", []),
+    }
+    RUN_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with RUN_HISTORY_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def run_benchmark_mode(runs: int = 20, debug: bool = False) -> None:
+    from evaluation import EVAL_DATASET
+
+    config = AppConfig.from_env()
+    config.dev_mode = debug
+    analyzer = RealityAnalyzer(config)
+
+    successes = 0
+    retries_total = 0.0
+    latencies: list[float] = []
+
+    for i in range(max(1, runs)):
+        case = EVAL_DATASET[i % len(EVAL_DATASET)]
+        started = time.perf_counter()
+        result = analyzer.analyze_code_multi_agent(case.input_text)
+        elapsed = time.perf_counter() - started
+        latencies.append(elapsed)
+
+        score = float(result.get("confidence", 0.0))
+        fixed = bool(str(result.get("fixed_code", "")).strip())
+        if score > 0.0 and (fixed or "source=llm" in ",".join(result.get("system_status", []))):
+            successes += 1
+
+        status_joined = ",".join(str(s) for s in result.get("system_status", []))
+        retries_total += float(config.local_llm_retries if "llm_unavailable" in status_joined else 1)
+
+        _append_run_history(f"benchmark_case_{i+1}", "benchmark", result)
+
+    total = max(1, runs)
+    failures = total - successes
+    avg_latency = sum(latencies) / total
+    avg_retries = retries_total / total
+
+    print("Model Performance:")
+    print(f"- Success Rate: {(successes / total) * 100:.0f}%")
+    print(f"- Avg Retries: {avg_retries:.1f}")
+    print(f"- Failures: {failures}/{total}")
+    print(f"- Avg Latency: {avg_latency:.2f}s")
+
+
+def run_history_mode(limit: int = 20) -> None:
+    if not RUN_HISTORY_PATH.exists():
+        print("No run history found.")
+        return
+    lines = RUN_HISTORY_PATH.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        print("No run history found.")
+        return
+    print("Run History:")
+    for raw in lines[-max(1, limit):]:
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue
+        print(
+            f"- {row.get('timestamp')} | mode={row.get('mode')} | "
+            f"score={row.get('score')} | input={str(row.get('input',''))[:60]}"
+        )
+
+
+def run_analyze_mode(text: str, mode: str = "debug", debug: bool = False) -> None:
+    config = AppConfig.from_env()
+    config.dev_mode = debug
+    analyzer = RealityAnalyzer(config)
+    formatter = OutputFormatter(Console())
+
+    result = analyzer.analyze(text, mode=mode, past_context=[])
+    formatter.render(result, mode, total_runs=0)
+    _append_run_history(text, mode, result)
 
 
 def _shutdown_watchers(observers: list[Any]) -> None:
@@ -407,15 +655,16 @@ def _print_help(console: Console) -> None:
     console.print("Commands:", style="cyan")
     console.print("help - Show available commands")
     console.print("history - Show previous inputs")
-    console.print("save [path] - Save session")
+    console.print("save <path> - Save session")
     console.print("export <file> - Export last analysis")
-    console.print("export compare [file] - Export comparison PDF from latest two analyses")
+    console.print("export compare <file> - Export comparison PDF from latest two analyses")
     console.print("review <file.py | folder_path> - Run multi-agent code review")
     console.print("fix <file.py> - Generate and save auto-fixed code as <name>_fixed.py")
     console.print("watch <folder> - Watch Python files and auto-review on change")
     console.print("agents all | agents debug improve predict - Agent control")
     console.print("mode debug|optimize|predict - Fallback profile")
-    console.print("exit - Close Reality Debugger")
+    console.print("exit | quit - Close Reality Debugger")
+    console.print("Ctrl+C - Force quit the CLI")
 
 
 def _print_startup_warnings(console: Console, config: AppConfig) -> None:
@@ -445,4 +694,27 @@ def _print_startup_warnings(console: Console, config: AppConfig) -> None:
 
 
 if __name__ == "__main__":
-    run_cli()
+    parser = argparse.ArgumentParser(description="TRX-AI CLI")
+    subparsers = parser.add_subparsers(dest="command")
+
+    p_benchmark = subparsers.add_parser("benchmark", help="Run benchmark mode")
+    p_benchmark.add_argument("--runs", type=int, default=20)
+    p_benchmark.add_argument("--debug", action="store_true")
+
+    p_history = subparsers.add_parser("history", help="Show persisted run history")
+    p_history.add_argument("--limit", type=int, default=20)
+
+    p_analyze = subparsers.add_parser("analyze", help="Analyze one input and exit")
+    p_analyze.add_argument("text", type=str)
+    p_analyze.add_argument("--mode", type=str, default="debug", choices=["debug", "optimize", "predict"])
+    p_analyze.add_argument("--debug", action="store_true")
+
+    args = parser.parse_args()
+    if args.command == "benchmark":
+        run_benchmark_mode(runs=args.runs, debug=args.debug)
+    elif args.command == "history":
+        run_history_mode(limit=args.limit)
+    elif args.command == "analyze":
+        run_analyze_mode(text=args.text, mode=args.mode, debug=args.debug)
+    else:
+        run_cli()
