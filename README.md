@@ -53,6 +53,14 @@ Metrics:
 - Avg Response Time
 - Completeness
 
+Graph:
+
+![Accuracy Graph](./assets/trx_ai_accuracy_graph.png)
+
+Screenshot:
+
+![Evaluation Output](./assets/evaluation_output.png)
+
 Detailed methodology is documented in [docs/evaluation.md](docs/evaluation.md).
 
 ## Reliability
@@ -108,12 +116,7 @@ trx-ai/
 ├── CONTRIBUTING.md
 ├── requirements.txt
 ├── LICENSE
-└── .github/
-    ├── workflows/
-    │   └── ci.yml
-    └── ISSUE_TEMPLATE/
-        ├── bug_report.md
-        └── feature_request.md
+
 ```
 
 ## Roadmap
@@ -123,10 +126,6 @@ trx-ai/
 - More evaluation cases across security/performance domains
 - Better visualization and dashboard export
 - Plugin-ready architecture for custom agents
-
-## Contributing
-
-Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening pull requests.
 
 ## License
 
