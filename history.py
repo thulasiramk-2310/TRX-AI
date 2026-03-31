@@ -105,23 +105,10 @@ class SessionHistory:
         structured_output: str,
     ) -> Path:
         """Exports a premium branded PDF report with card-based layout."""
-        try:
-            from reportlab.lib import colors
-            from reportlab.lib.pagesizes import A4
-            from reportlab.lib.units import cm
-            from reportlab.pdfgen import canvas
-        except Exception as exc:  # pragma: no cover - depends on optional package
-            raise RuntimeError(
-                "PDF export requires reportlab. Install it with: pip install reportlab"
-            ) from exc
-
-        reports_dir = Path("reports")
-        reports_dir.mkdir(parents=True, exist_ok=True)
-
-        safe_name = filename.strip() or "report.pdf"
-        if not safe_name.lower().endswith(".pdf"):
-            safe_name += ".pdf"
-        destination = reports_dir / safe_name
+        colors, A4, cm, canvas = self._reportlab_or_raise(
+            "PDF export requires reportlab. Install it with: pip install reportlab"
+        )
+        destination = self._prepare_report_path(filename, default_name="report.pdf")
 
         logo_path = self._ensure_logo_image()
         diagram_path = Path("assets") / "diagram.png"
@@ -133,16 +120,7 @@ class SessionHistory:
         page_number = 1
 
         doc = canvas.Canvas(str(destination), pagesize=A4)
-        theme = {
-            "bg": colors.HexColor("#F7FAFF"),
-            "ink": colors.HexColor("#0E2238"),
-            "muted": colors.HexColor("#4A5D73"),
-            "line": colors.HexColor("#BFDDF2"),
-            "brand": colors.HexColor("#00AEEF"),
-            "brand_dark": colors.HexColor("#1A4F8B"),
-            "card_bg": colors.HexColor("#FFFFFF"),
-            "card_line": colors.HexColor("#D6E8F8"),
-        }
+        theme = self._build_pdf_theme(colors)
 
         y = self._draw_page_header(
             doc,
@@ -253,23 +231,10 @@ class SessionHistory:
         second_label: str = "Run 2",
     ) -> Path:
         """Exports a visual comparison PDF with metric chart for two analyses."""
-        try:
-            from reportlab.lib import colors
-            from reportlab.lib.pagesizes import A4
-            from reportlab.lib.units import cm
-            from reportlab.pdfgen import canvas
-        except Exception as exc:  # pragma: no cover - depends on optional package
-            raise RuntimeError(
-                "Comparison PDF export requires reportlab. Install it with: pip install reportlab"
-            ) from exc
-
-        reports_dir = Path("reports")
-        reports_dir.mkdir(parents=True, exist_ok=True)
-
-        safe_name = filename.strip() or "comparison_report.pdf"
-        if not safe_name.lower().endswith(".pdf"):
-            safe_name += ".pdf"
-        destination = reports_dir / safe_name
+        colors, A4, cm, canvas = self._reportlab_or_raise(
+            "Comparison PDF export requires reportlab. Install it with: pip install reportlab"
+        )
+        destination = self._prepare_report_path(filename, default_name="comparison_report.pdf")
 
         logo_path = self._ensure_logo_image()
 
@@ -279,16 +244,7 @@ class SessionHistory:
 
         doc = canvas.Canvas(str(destination), pagesize=A4)
 
-        theme = {
-            "bg": colors.HexColor("#F7FAFF"),
-            "ink": colors.HexColor("#0E2238"),
-            "muted": colors.HexColor("#4A5D73"),
-            "line": colors.HexColor("#BFDDF2"),
-            "brand": colors.HexColor("#00AEEF"),
-            "brand_dark": colors.HexColor("#1A4F8B"),
-            "card_bg": colors.HexColor("#FFFFFF"),
-            "card_line": colors.HexColor("#D6E8F8"),
-        }
+        theme = self._build_pdf_theme(colors)
 
         y = self._draw_page_header(
             doc,
@@ -409,6 +365,39 @@ class SessionHistory:
         self._draw_footer(doc, width, margin_x, page_number)
         doc.save()
         return destination
+
+    @staticmethod
+    def _reportlab_or_raise(error_message: str):
+        try:
+            from reportlab.lib import colors
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib.units import cm
+            from reportlab.pdfgen import canvas
+        except Exception as exc:  # pragma: no cover - depends on optional package
+            raise RuntimeError(error_message) from exc
+        return colors, A4, cm, canvas
+
+    @staticmethod
+    def _prepare_report_path(filename: str, *, default_name: str) -> Path:
+        reports_dir = Path("reports")
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = filename.strip() or default_name
+        if not safe_name.lower().endswith(".pdf"):
+            safe_name += ".pdf"
+        return reports_dir / safe_name
+
+    @staticmethod
+    def _build_pdf_theme(colors: Any) -> dict[str, Any]:
+        return {
+            "bg": colors.HexColor("#F7FAFF"),
+            "ink": colors.HexColor("#0E2238"),
+            "muted": colors.HexColor("#4A5D73"),
+            "line": colors.HexColor("#BFDDF2"),
+            "brand": colors.HexColor("#00AEEF"),
+            "brand_dark": colors.HexColor("#1A4F8B"),
+            "card_bg": colors.HexColor("#FFFFFF"),
+            "card_line": colors.HexColor("#D6E8F8"),
+        }
 
     @staticmethod
     def _parse_structured_sections(structured_output: str) -> dict[str, list[str]]:

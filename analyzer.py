@@ -231,6 +231,7 @@ class RealityAnalyzer:
         "debug", "optimize", "predict", "procrast", "stress", "anxious", "broken", "cannot", "can't",
         "delay", "delays", "late", "communication", "burnout",
     }
+    REVIEW_PROMPT_MAX_CHARS = 2500
 
     def __init__(self, config: AppConfig) -> None:
         self.config = config
@@ -580,7 +581,7 @@ class RealityAnalyzer:
             return cached_copy
 
         # Guard against oversized payloads that can degrade model quality.
-        code_for_prompt = cleaned_code[:2500] if len(cleaned_code) > 2500 else cleaned_code
+        code_for_prompt = cleaned_code[: self.REVIEW_PROMPT_MAX_CHARS]
         if self.config.dev_mode or self.config.review_logging:
             print("[Code Review -> Using LLM]")
         started = time.perf_counter()
@@ -590,25 +591,8 @@ class RealityAnalyzer:
             print(f"[LLM time: {elapsed:.2f}s]")
 
         if not pipeline.get("ok"):
-            fallback_sections = self._fallback_code_review_sections(cleaned_code)
-            heuristic_fixed = self._rule_based_fixed_code(cleaned_code)
-            confidence_score = int(fallback_sections.get("confidence_score", 65))
             self._record_failure(cleaned_code, "", "llm_unavailable")
-            result = {
-                "response_mode": "analysis",
-                "analysis_text": self._compose_code_review_text(fallback_sections),
-                "system_status": ["intent=review", "source=rule-fallback", "llm_unavailable", "fixed_code_heuristic"],
-                "confidence": round(confidence_score / 100.0, 2),
-                "confidence_score": confidence_score,
-                "debug_analysis": fallback_sections.get("code_debug", []),
-                "improvements": fallback_sections.get("code_improvements", []) + fallback_sections.get("security", []),
-                "predictions": fallback_sections.get("performance", []),
-                "final_insight": fallback_sections.get("final_summary", []),
-                "fixed_code": heuristic_fixed,
-                "analysis_source": "rule",
-                "intent": "review",
-                "intent_source": "rule",
-            }
+            result = self._build_review_failure_result(cleaned_code, language)
             self._review_cache_set(review_cache_key, result)
             return result
 
@@ -618,15 +602,61 @@ class RealityAnalyzer:
             self._debug_print_safe(response_text)
         if "no high-confidence" in response_text.lower():
             response_text += "\n\nNOTE: Response may be generic due to weak prompt or model limitations."
-        fixed_code = self._extract_fixed_code(response_text)
         sections = self._parse_code_review_sections(response_text)
         sections = self._normalize_review_sections(sections)
         truncated = bool(pipeline.get("truncated"))
+        fixed_code, repaired_from_invalid = self._resolve_fixed_code(
+            response_text=response_text,
+            cleaned_code=cleaned_code,
+            language=language,
+        )
         if not fixed_code:
-            fallback_fixed = self._generate_fixed_code_only(cleaned_code, language)
-            if fallback_fixed:
-                fixed_code = fallback_fixed
+            self._record_failure(cleaned_code, response_text, "fixed_code_missing")
+
+        result = self._build_review_success_result(
+            sections=sections,
+            pipeline=pipeline,
+            cleaned_code=cleaned_code,
+            fixed_code=fixed_code,
+            truncated=truncated,
+            repaired_from_invalid=repaired_from_invalid,
+        )
+        self._review_cache_set(review_cache_key, result)
+        return result
+
+    def _build_review_failure_result(self, cleaned_code: str, language: str) -> dict[str, Any]:
+        fallback_sections = self._fallback_code_review_sections(cleaned_code)
+        heuristic_fixed = self._rule_based_fixed_code(cleaned_code, language)
+        confidence_score = int(fallback_sections.get("confidence_score", 65))
+        return {
+            "response_mode": "analysis",
+            "analysis_text": self._compose_code_review_text(fallback_sections),
+            "system_status": ["intent=review", "source=rule-fallback", "llm_unavailable", "fixed_code_heuristic"],
+            "confidence": round(confidence_score / 100.0, 2),
+            "confidence_score": confidence_score,
+            "debug_analysis": fallback_sections.get("code_debug", []),
+            "improvements": fallback_sections.get("code_improvements", []) + fallback_sections.get("security", []),
+            "predictions": fallback_sections.get("performance", []),
+            "final_insight": fallback_sections.get("final_summary", []),
+            "fixed_code": heuristic_fixed,
+            "analysis_source": "rule",
+            "intent": "review",
+            "intent_source": "rule",
+        }
+
+    def _resolve_fixed_code(
+        self,
+        *,
+        response_text: str,
+        cleaned_code: str,
+        language: str,
+    ) -> tuple[str, bool]:
+        fixed_code = self._extract_fixed_code(response_text)
         repaired_from_invalid = False
+
+        if not fixed_code:
+            fixed_code = self._generate_fixed_code_only(cleaned_code, language)
+
         if fixed_code and not self._is_valid_fixed_code(fixed_code, language):
             repaired = self._repair_invalid_code(fixed_code, cleaned_code, language)
             if repaired and self._is_valid_fixed_code(repaired, language):
@@ -634,31 +664,38 @@ class RealityAnalyzer:
                 repaired_from_invalid = True
             else:
                 fixed_code = ""
+
         if not fixed_code:
             heuristic_fixed = self._rule_based_fixed_code(cleaned_code, language)
             if heuristic_fixed and self._is_valid_fixed_code(heuristic_fixed, language):
                 fixed_code = heuristic_fixed
-        if not fixed_code:
-            self._record_failure(cleaned_code, response_text, "fixed_code_missing")
 
+        return fixed_code, repaired_from_invalid
+
+    def _build_review_success_result(
+        self,
+        *,
+        sections: dict[str, Any],
+        pipeline: dict[str, Any],
+        cleaned_code: str,
+        fixed_code: str,
+        truncated: bool,
+        repaired_from_invalid: bool,
+    ) -> dict[str, Any]:
         confidence_score = int(sections.get("confidence_score", 70))
         analysis_text = self._compose_code_review_text(sections)
-
         status = ["intent=review", "source=llm", "llm_ok"]
-        if len(cleaned_code) > 2500:
+        if len(cleaned_code) > self.REVIEW_PROMPT_MAX_CHARS:
             status.append("code_truncated_for_review")
         if truncated:
             status.append("llm_output_truncated")
-        if fixed_code:
-            status.append("fixed_code_ready")
-        else:
-            status.append("fixed_code_missing")
+        status.append("fixed_code_ready" if fixed_code else "fixed_code_missing")
         if repaired_from_invalid:
             status.append("fixed_code_repaired")
         status.append(f"critic_score={pipeline.get('critic_score', 0.0):.2f}")
         status.append(f"steps={len(pipeline.get('steps', []))}")
 
-        result = {
+        return {
             "response_mode": "analysis",
             "analysis_text": analysis_text,
             "system_status": status,
@@ -673,8 +710,6 @@ class RealityAnalyzer:
             "intent": "review",
             "intent_source": "llm",
         }
-        self._review_cache_set(review_cache_key, result)
-        return result
 
     def _run_code_review_multi_agent_pipeline(self, code_for_prompt: str, language: str) -> dict[str, Any]:
         steps: list[str] = []

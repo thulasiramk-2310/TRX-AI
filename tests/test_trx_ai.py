@@ -1,9 +1,12 @@
 ﻿from __future__ import annotations
 
 import io
+import warnings
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+warnings.simplefilter("ignore", DeprecationWarning)
 
 from rich.console import Console
 
@@ -12,8 +15,8 @@ from analyzer import RealityAnalyzer
 from config import AppConfig
 from formatter import OutputFormatter
 from history import SessionHistory
+from semantic_scoring import SemanticMatcher
 from watcher import CodeChangeHandler
-
 
 class AnalyzerTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -130,6 +133,17 @@ def ignored():
         self.assertFalse(RealityAnalyzer._is_valid_python_code("def f(:\n    return 1\n"))
 
 
+class SemanticScoreTests(unittest.TestCase):
+    def test_semantic_match_synonym(self) -> None:
+        matcher = SemanticMatcher()
+        score = matcher.score("add empty check", "include guard clause for empty input array")
+        self.assertGreaterEqual(score, 0.20)
+
+    def test_semantic_match_exact_phrase(self) -> None:
+        matcher = SemanticMatcher()
+        score = matcher.score("sql injection risk", "There is a SQL injection risk due to string concatenation.")
+        self.assertGreaterEqual(score, 0.95)
+
 class FormatterTests(unittest.TestCase):
     def test_cp1252_render_does_not_crash(self) -> None:
         buffer = io.BytesIO()
@@ -229,3 +243,14 @@ class HistoryExportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+
+
+
+
+
+
+
+

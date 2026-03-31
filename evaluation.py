@@ -5,12 +5,12 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
 from analyzer import RealityAnalyzer, call_local_llm
 from config import AppConfig
+from semantic_scoring import SemanticMatcher
 
 
 @dataclass(frozen=True)
@@ -98,19 +98,7 @@ EVAL_DATASET: list[EvalCase] = [
 ]
 
 
-SYNONYMS: dict[str, set[str]] = {
-    "array": {"list", "vector"},
-    "list": {"array", "vector"},
-    "index": {"bounds", "out-of-range", "outofrange"},
-    "error": {"exception", "failure"},
-    "timeout": {"time out"},
-    "iterative": {"loop", "dynamic-programming", "dp", "memoization"},
-    "memoization": {"cache", "dynamic-programming", "dp"},
-    "empty": {"null", "none"},
-    "sql": {"database", "query"},
-    "injection": {"unsafe", "untrusted"},
-    "parameterized": {"prepared", "bind"},
-}
+SEMANTIC_MATCHER = SemanticMatcher()
 
 
 def _normalize_text(text: str) -> str:
@@ -122,29 +110,11 @@ def _normalize_text(text: str) -> str:
 
 def _tokenize(text: str) -> set[str]:
     base = _normalize_text(text)
-    tokens = set(base.split())
-    expanded = set(tokens)
-    for token in list(tokens):
-        expanded.update(SYNONYMS.get(token, set()))
-    return expanded
+    return set(base.split())
 
 
 def _semantic_match(expected: str, actual_text: str) -> float:
-    expected_norm = _normalize_text(expected)
-    actual_norm = _normalize_text(actual_text)
-    if not expected_norm or not actual_norm:
-        return 0.0
-    if expected_norm in actual_norm:
-        return 1.0
-
-    expected_tokens = _tokenize(expected_norm)
-    actual_tokens = _tokenize(actual_norm)
-    if not expected_tokens:
-        return 0.0
-
-    overlap = len(expected_tokens.intersection(actual_tokens)) / max(1, len(expected_tokens))
-    fuzzy = SequenceMatcher(None, expected_norm, actual_norm).ratio()
-    return max(overlap, fuzzy)
+    return SEMANTIC_MATCHER.score(expected, actual_text)
 
 
 def _as_search_text(result: dict[str, Any]) -> str:
