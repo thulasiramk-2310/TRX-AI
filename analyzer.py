@@ -346,6 +346,11 @@ class RealityAnalyzer:
         if self._is_greeting(normalized):
             return {"intent": "greeting", "confidence": 1.0, "source": "rule"}
 
+        # Direct definition/acronym requests should return a normal chat answer,
+        # not a multi-step problem analysis panel.
+        if self._is_definition_query(normalized):
+            return {"intent": "chat", "confidence": 0.95, "source": "rule"}
+
         if self._is_strong_problem_signal(normalized):
             return {"intent": "problem", "confidence": 0.85, "source": "rule"}
 
@@ -402,6 +407,21 @@ class RealityAnalyzer:
         if token_count < 3:
             return True
         return False
+
+    @staticmethod
+    def _is_definition_query(normalized: str) -> bool:
+        token_count = len([part for part in normalized.split(" ") if part])
+        definition_markers = (
+            "full form",
+            "stands for",
+            "meaning of",
+            "what is",
+            "what does",
+            "define",
+        )
+        if token_count > 10:
+            return False
+        return any(marker in normalized for marker in definition_markers)
 
     def _classify_intent_with_llm(self, user_input: str) -> dict[str, Any] | None:
         prompt = (
@@ -620,6 +640,7 @@ class RealityAnalyzer:
             fixed_code=fixed_code,
             truncated=truncated,
             repaired_from_invalid=repaired_from_invalid,
+            raw_llm_output=response_text,
         )
         self._review_cache_set(review_cache_key, result)
         return result
@@ -681,6 +702,7 @@ class RealityAnalyzer:
         fixed_code: str,
         truncated: bool,
         repaired_from_invalid: bool,
+        raw_llm_output: str,
     ) -> dict[str, Any]:
         confidence_score = int(sections.get("confidence_score", 70))
         analysis_text = self._compose_code_review_text(sections)
@@ -692,6 +714,12 @@ class RealityAnalyzer:
         status.append("fixed_code_ready" if fixed_code else "fixed_code_missing")
         if repaired_from_invalid:
             status.append("fixed_code_repaired")
+        weak_parsing = (
+            "LLM output parsing incomplete - check raw output" in sections.get("performance", [])
+            or "No critical bugs were explicitly identified." in sections.get("code_debug", [])
+        )
+        if weak_parsing:
+            status.append("structured_parse_weak")
         status.append(f"critic_score={pipeline.get('critic_score', 0.0):.2f}")
         status.append(f"steps={len(pipeline.get('steps', []))}")
 
@@ -706,6 +734,7 @@ class RealityAnalyzer:
             "predictions": sections.get("performance", []),
             "final_insight": sections.get("final_summary", []),
             "fixed_code": fixed_code,
+            "raw_llm_output": raw_llm_output[:18000],
             "analysis_source": "llm",
             "intent": "review",
             "intent_source": "llm",

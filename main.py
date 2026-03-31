@@ -45,6 +45,54 @@ SUPPORTED_CODE_SUFFIXES = {
 }
 
 
+def _loader_text_for_prompt(user_input: str) -> str:
+    normalized = user_input.strip().lower()
+    if normalized.startswith("review "):
+        return "Reviewing code with multi-agent pipeline..."
+    if normalized.startswith("fix "):
+        return "Generating corrected code..."
+    if normalized.startswith("watch "):
+        return "Preparing real-time watcher..."
+    if normalized.startswith("export"):
+        return "Preparing report export..."
+    if normalized.startswith("agents"):
+        return "Updating agent configuration..."
+    if normalized.startswith("mode "):
+        return "Switching analysis mode..."
+    if normalized in {"help", "history", "save"} or normalized.startswith("save "):
+        return "Loading command output..."
+    if normalized in {"exit", "quit"}:
+        return "Shutting down TRX-AI..."
+
+    keyword_map = {
+        "debug": "Running debug reasoning...",
+        "optimize": "Evaluating optimization paths...",
+        "predict": "Building prediction model output...",
+        "error": "Diagnosing issue details...",
+        "bug": "Diagnosing issue details...",
+        "explain": "Preparing explanation...",
+    }
+    for keyword, message in keyword_map.items():
+        if keyword in normalized:
+            return message
+
+    return "Thinking..."
+
+
+def _show_prompt_loader(console: Console, user_input: str, delay_seconds: float) -> None:
+    loader_text = _loader_text_for_prompt(user_input)
+    spinner = Spinner("dots", text=loader_text, style="bright_cyan")
+    with Live(Align.center(spinner), console=console, refresh_per_second=20, transient=True):
+        time.sleep(max(0.16, min(0.65, delay_seconds)))
+
+
+def _run_with_prompt_loader(console: Console, user_input: str, operation: Callable[[], Any]) -> Any:
+    loader_text = _loader_text_for_prompt(user_input)
+    spinner = Spinner("dots", text=loader_text, style="bright_cyan")
+    with Live(Align.center(spinner), console=console, refresh_per_second=20, transient=True):
+        return operation()
+
+
 def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
     console = Console()
     config = AppConfig.from_env()
@@ -84,16 +132,26 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
         command_parts = user_input.split()
 
         if command in {"exit", "quit"}:
+            _run_with_prompt_loader(console, user_input, lambda: None)
             _shutdown_watchers(active_watchers)
             console.print("Exiting Reality Debugger. Goodbye!", style="cyan")
             break
 
         if command == "help":
-            _print_help(console)
+            _run_with_prompt_loader(
+                console,
+                user_input,
+                lambda: formatter.render_help_dashboard(
+                    mode=mode,
+                    total_runs=total_analyses,
+                    model_name=config.local_llm_model,
+                    active_agents=analyzer.active_agents(),
+                ),
+            )
             continue
 
         if command == "history":
-            inputs = history.list_inputs()
+            inputs = _run_with_prompt_loader(console, user_input, history.list_inputs)
             if not inputs:
                 _print_error(console, "No history yet.")
             else:
@@ -107,7 +165,7 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                 save_path = None
                 if len(command_parts) > 1:
                     save_path = " ".join(command_parts[1:])
-                saved_path = history.save(save_path)
+                saved_path = _run_with_prompt_loader(console, user_input, lambda: history.save(save_path))
                 console.print(f"[OK] Session saved: {saved_path}", style="green")
             except OSError as exc:
                 _print_error(console, f"Unable to save session: {exc}")
@@ -115,7 +173,11 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
 
         if command.startswith("export"):
             if len(command_parts) >= 2 and command_parts[1].lower() == "compare":
-                compare_entries = history.latest_analysis_entries(limit=2)
+                compare_entries = _run_with_prompt_loader(
+                    console,
+                    user_input,
+                    lambda: history.latest_analysis_entries(limit=2),
+                )
                 if len(compare_entries) < 2:
                     _print_error(console, "No analysis available to export")
                     continue
@@ -129,15 +191,19 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                 second_structured = formatter.structured_text(second_entry["analysis"])
 
                 try:
-                    comparison_path = history.export_comparison_pdf_report(
-                        compare_name,
-                        first_input=str(first_entry.get("input", "")),
-                        second_input=str(second_entry.get("input", "")),
-                        mode=str(second_entry.get("mode", mode)),
-                        first_structured_output=first_structured,
-                        second_structured_output=second_structured,
-                        first_label="Run 1",
-                        second_label="Run 2",
+                    comparison_path = _run_with_prompt_loader(
+                        console,
+                        user_input,
+                        lambda: history.export_comparison_pdf_report(
+                            compare_name,
+                            first_input=str(first_entry.get("input", "")),
+                            second_input=str(second_entry.get("input", "")),
+                            mode=str(second_entry.get("mode", mode)),
+                            first_structured_output=first_structured,
+                            second_structured_output=second_structured,
+                            first_label="Run 1",
+                            second_label="Run 2",
+                        ),
                     )
                     console.print(f"[OK] Comparison report generated: {comparison_path}", style="green")
                 except RuntimeError as exc:
@@ -161,18 +227,26 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
             structured = formatter.structured_text(analysis)
             try:
                 if report_name.lower().endswith(".pdf"):
-                    report_path = history.export_pdf_report(
-                        report_name,
-                        str(latest.get("input", "")),
-                        str(latest.get("mode", mode)),
-                        structured,
+                    report_path = _run_with_prompt_loader(
+                        console,
+                        user_input,
+                        lambda: history.export_pdf_report(
+                            report_name,
+                            str(latest.get("input", "")),
+                            str(latest.get("mode", mode)),
+                            structured,
+                        ),
                     )
                 else:
-                    report_path = history.export_report(
-                        report_name,
-                        user_input=str(latest.get("input", "")),
-                        mode=str(latest.get("mode", mode)),
-                        structured_output=structured,
+                    report_path = _run_with_prompt_loader(
+                        console,
+                        user_input,
+                        lambda: history.export_report(
+                            report_name,
+                            user_input=str(latest.get("input", "")),
+                            mode=str(latest.get("mode", mode)),
+                            structured_output=structured,
+                        ),
                     )
                 console.print(f"[OK] Report generated: {report_path}", style="green")
             except RuntimeError as exc:
@@ -185,13 +259,14 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                 _print_error(console, "Usage: agents all OR agents debug improve predict")
                 continue
             try:
-                analyzer.set_active_agents(requested)
+                _run_with_prompt_loader(console, user_input, lambda: analyzer.set_active_agents(requested))
                 _print_dashboard(console, config, total_analyses, analyzer)
             except ValueError as exc:
                 _print_error(console, str(exc))
             continue
 
         if command in {"mode debug", "mode optimize", "mode predict"}:
+            _run_with_prompt_loader(console, user_input, lambda: None)
             mode = command.split()[1]
             console.print(f"Fallback profile: {mode.upper()}", style="cyan")
             _print_dashboard(console, config, total_analyses, analyzer)
@@ -209,14 +284,26 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
             target = " ".join(command_parts[1:]).strip()
             try:
                 code_blob = _load_review_target(target)
-                result = analyzer.analyze_code_multi_agent(code_blob)
+                result = _run_with_prompt_loader(
+                    console,
+                    user_input,
+                    lambda: analyzer.analyze_code_multi_agent(code_blob),
+                )
                 result["original_code"] = code_blob[:20000]
                 result["review_target"] = target
                 total_analyses += 1
+                _attach_ui_context(
+                    result,
+                    current_input=f"review {target}",
+                    model_name=config.local_llm_model,
+                    active_agents=analyzer.active_agents(),
+                )
                 formatter.render(result, mode, total_runs=total_analyses)
                 history.add_entry(f"review {target}", "review", result)
                 _append_run_history(f"review {target}", "review", result)
                 _print_dashboard(console, config, total_analyses, analyzer)
+            except KeyboardInterrupt:
+                console.print("\n[Cancelled] Review interrupted by user.", style="yellow")
             except FileNotFoundError:
                 _print_error(console, f"File or folder not found: {target}")
             except IsADirectoryError:
@@ -247,10 +334,20 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                 if not original_code.strip():
                     raise ValueError(f"Empty file: {target_path}")
 
-                result = analyzer.analyze_code_multi_agent(original_code)
+                result = _run_with_prompt_loader(
+                    console,
+                    user_input,
+                    lambda: analyzer.analyze_code_multi_agent(original_code),
+                )
                 result["original_code"] = original_code[:20000]
                 result["review_target"] = target
                 total_analyses += 1
+                _attach_ui_context(
+                    result,
+                    current_input=f"fix {target}",
+                    model_name=config.local_llm_model,
+                    active_agents=analyzer.active_agents(),
+                )
                 formatter.render(result, mode, total_runs=total_analyses)
                 history.add_entry(f"fix {target}", "fix", result)
                 _append_run_history(f"fix {target}", "fix", result)
@@ -283,6 +380,8 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                 )
                 console.print(f"[OK] Fixed file saved as: {fixed_path}", style="green")
                 _print_dashboard(console, config, total_analyses, analyzer)
+            except KeyboardInterrupt:
+                console.print("\n[Cancelled] Fix interrupted by user.", style="yellow")
             except FileNotFoundError:
                 _print_error(console, f"File not found: {target}")
             except ValueError as exc:
@@ -308,13 +407,17 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                 auto_fix_answer = prompt("Apply fixes automatically? (y/n)").strip().lower()
                 auto_fix = auto_fix_answer in {"y", "yes"}
 
-                observer = start_watcher(
-                    str(watch_path),
-                    analyzer,
-                    formatter,
-                    auto_fix=auto_fix,
-                    fix_writer=apply_code_fix,
-                    debounce_seconds=1.0,
+                observer = _run_with_prompt_loader(
+                    console,
+                    user_input,
+                    lambda: start_watcher(
+                        str(watch_path),
+                        analyzer,
+                        formatter,
+                        auto_fix=auto_fix,
+                        fix_writer=apply_code_fix,
+                        debounce_seconds=1.0,
+                    ),
                 )
                 active_watchers.append(observer)
                 console.print(f"[OK] Watching folder: {watch_path.resolve()}", style="green")
@@ -330,13 +433,25 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
 
         try:
             context = history.recent_context(limit=config.context_window_size)
-            result = analyzer.analyze(user_input, mode=mode, past_context=context)
+            result = _run_with_prompt_loader(
+                console,
+                user_input,
+                lambda: analyzer.analyze(user_input, mode=mode, past_context=context),
+            )
             if result.get("response_mode") == "analysis":
                 total_analyses += 1
+            _attach_ui_context(
+                result,
+                current_input=user_input,
+                model_name=config.local_llm_model,
+                active_agents=analyzer.active_agents(),
+            )
             formatter.render(result, mode, total_runs=total_analyses)
             history.add_entry(user_input, mode, result)
             _append_run_history(user_input, mode, result)
             _print_dashboard(console, config, total_analyses, analyzer)
+        except KeyboardInterrupt:
+            console.print("\n[Cancelled] Request interrupted by user.", style="yellow")
         except ValueError as exc:
             _print_error(console, str(exc))
         except Exception as exc:
@@ -535,6 +650,23 @@ def _append_run_history(user_input: str, mode: str, result: dict[str, Any]) -> N
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def _attach_ui_context(
+    result: dict[str, Any],
+    *,
+    current_input: str,
+    model_name: str,
+    active_agents: list[str],
+) -> None:
+    intent = str(result.get("intent", "")).lower()
+    dashboard_agents = active_agents
+    if intent == "review" or current_input.strip().lower().startswith("fix "):
+        dashboard_agents = ["debug", "improve"]
+
+    result["current_input"] = current_input
+    result["model_name"] = model_name
+    result["active_agents"] = dashboard_agents
+
+
 def run_benchmark_mode(runs: int = 20, debug: bool = False) -> None:
     from evaluation import EVAL_DATASET
 
@@ -602,6 +734,12 @@ def run_analyze_mode(text: str, mode: str = "debug", debug: bool = False) -> Non
     formatter = OutputFormatter(Console())
 
     result = analyzer.analyze(text, mode=mode, past_context=[])
+    _attach_ui_context(
+        result,
+        current_input=text,
+        model_name=config.local_llm_model,
+        active_agents=analyzer.active_agents(),
+    )
     formatter.render(result, mode, total_runs=0)
     _append_run_history(text, mode, result)
 
@@ -622,14 +760,9 @@ def _print_dashboard(
     total_analyses: int,
     analyzer: RealityAnalyzer,
 ) -> None:
-    agents = ", ".join(analyzer.active_agents())
-    typing = "ON" if config.typing_effect_enabled else "OFF"
-    transition = "ON" if config.ui_transitions_enabled else "OFF"
-
-    console.print()
-    console.print(f"TRX-AI | Agents: {agents} | Runs: {total_analyses}")
-    console.print(f"Model: {config.local_llm_model} | Typing: {typing} | UI: {transition}")
-    console.print()
+    # Dashboard status is rendered by OutputFormatter bottom bar.
+    # Keep this function as a no-op to avoid duplicate UI blocks.
+    return
 
 
 def _print_startup(console: Console) -> None:
