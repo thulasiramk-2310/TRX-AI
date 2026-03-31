@@ -49,6 +49,7 @@ class AppConfig:
     ui_transition_delay_seconds: float = 0.35
     context_window_size: int = 3
     dev_mode: bool = False
+    review_logging: bool = False
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -72,4 +73,5 @@ class AppConfig:
             ui_transition_delay_seconds=float(os.getenv("RD_UI_TRANSITION_DELAY", "0.35")),
             context_window_size=int(os.getenv("RD_CONTEXT_WINDOW", "3")),
             dev_mode=os.getenv("RD_DEV_MODE", "false").lower() == "true",
+            review_logging=os.getenv("RD_REVIEW_LOGS", "false").lower() == "true",
         )

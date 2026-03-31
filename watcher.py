@@ -10,6 +10,11 @@ from typing import Any, Callable
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
+SUPPORTED_CODE_SUFFIXES = {
+    ".py", ".js", ".ts", ".java", ".c", ".cpp", ".cc", ".cs",
+    ".go", ".rs", ".swift", ".kt", ".php", ".sql", ".rb",
+}
+
 
 class CodeChangeHandler(FileSystemEventHandler):
     """Watches Python file changes and triggers review."""
@@ -74,7 +79,7 @@ class CodeChangeHandler(FileSystemEventHandler):
             print(f"[Watcher error] {exc}")
 
     def _is_supported_python_file(self, src_path: str) -> bool:
-        return src_path.lower().endswith(".py")
+        return Path(src_path).suffix.lower() in SUPPORTED_CODE_SUFFIXES
 
     def _is_temp_or_ignored(self, src_path: str) -> bool:
         path = Path(src_path)

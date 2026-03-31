@@ -62,9 +62,9 @@ python evaluation.py
 - `export compare <file>` - Export comparison PDF from latest two analyses
 - `agents all | agents debug improve predict` - Control active agents
 - `mode debug|optimize|predict` - Set fallback profile
-- `review <file.py | folder_path>` - Run multi-agent code review
-- `fix <file.py>` - Generate fixed code and ask before saving
-- `watch <folder>` - Auto-review changed code files
+- `review <code_file | folder_path>` - Run multi-agent code review
+- `fix <code_file>` - Generate fixed code and ask before saving
+- `watch <folder>` - Auto-review changed code files (`.py/.js/.ts/.java/.c/.cpp/.cs/.go/.rs/.swift/.kt/.php/.sql/.rb`)
 - `exit | quit` - Close CLI
 
 ## Output Format
@@ -128,6 +128,7 @@ LOCAL_LLM_MODEL=qwen3:8b
 HF_REQUEST_TIMEOUT=120
 HF_MAX_NEW_TOKENS=600
 HF_TEMPERATURE=0.3
+RD_REVIEW_LOGS=false
 ```
 
 3. Start:

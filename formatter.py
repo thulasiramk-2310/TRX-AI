@@ -199,14 +199,16 @@ class OutputFormatter:
             text = re.sub(r"\s+", " ", text).strip()
             return safe_terminal_text(text)
 
-        def compact_line(value: str, max_len: int = 80) -> str:
+        def compact_line(value: str, max_len: int | None = None) -> str:
             text = clean_line(value)
+            if max_len is None:
+                return text
             if len(text) <= max_len:
                 return text
             return text[: max_len - 3].rstrip() + "..."
 
         def with_line_hint(value: str) -> str:
-            text = compact_line(value)
+            text = compact_line(value, max_len=None)
             match = re.search(
                 r"\bline(?:s)?\s*(\d+(?:\s*[-–]\s*\d+)?)\b\)?\s*[:\-]?\s*(.*)",
                 text,
@@ -289,7 +291,7 @@ class OutputFormatter:
                 confidence_color = "red"
             content.append(f"{bullet} {score}%\n", style=confidence_color)
         else:
-            response = compact_line(str(analysis.get("chat_response", "I am here to help.")), max_len=220)
+            response = compact_line(str(analysis.get("chat_response", "I am here to help.")), max_len=None)
             if not response.strip():
                 response = "I am here to help."
             content.append("TRX-AI\n", style="bold")

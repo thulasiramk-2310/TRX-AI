@@ -2,6 +2,7 @@
 
 import io
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from rich.console import Console
@@ -10,6 +11,8 @@ import main
 from analyzer import RealityAnalyzer
 from config import AppConfig
 from formatter import OutputFormatter
+from history import SessionHistory
+from watcher import CodeChangeHandler
 
 
 class AnalyzerTests(unittest.TestCase):
@@ -107,6 +110,21 @@ def ignored():
         self.assertIn("cache_hit", second.get("system_status", []))
         self.assertEqual(first.get("fixed_code"), second.get("fixed_code"))
 
+    def test_normalize_review_sections_dedupes(self) -> None:
+        raw = {
+            "code_debug": ["Line 1 issue", "Line 1 issue", "Line 2 issue"],
+            "code_improvements": ["Refactor loop", "Refactor loop"],
+            "performance": [],
+            "security": [],
+            "fix_suggestions": [],
+            "final_summary": ["Fix line 1 first", "Fix line 1 first"],
+            "confidence_score": 70,
+        }
+        normalized = RealityAnalyzer._normalize_review_sections(raw)
+        self.assertEqual(len(normalized["code_debug"]), 2)
+        self.assertEqual(len(normalized["code_improvements"]), 1)
+        self.assertTrue(normalized["fix_suggestions"])
+
     def test_python_validation(self) -> None:
         self.assertTrue(RealityAnalyzer._is_valid_python_code("def f():\n    return 1\n"))
         self.assertFalse(RealityAnalyzer._is_valid_python_code("def f(:\n    return 1\n"))
@@ -179,6 +197,34 @@ class CLISmokeTests(unittest.TestCase):
 
         with patch.object(main, "RealityAnalyzer", FakeAnalyzer), patch.object(main, "_print_startup", lambda _c: None):
             main.run_cli(input_fn=fake_input)
+
+
+class WatcherTests(unittest.TestCase):
+    def test_unchanged_content_is_skipped(self) -> None:
+        handler = CodeChangeHandler(analyzer=object(), formatter=object())
+        src = "demo.py"
+        self.assertFalse(handler._is_unchanged_content(src, "print('x')\n"))
+        self.assertTrue(handler._is_unchanged_content(src, "print('x')\n"))
+        self.assertFalse(handler._is_unchanged_content(src, "print('y')\n"))
+
+
+class HistoryExportTests(unittest.TestCase):
+    def test_comparison_pdf_export_smoke(self) -> None:
+        history = SessionHistory()
+        try:
+            out = history.export_comparison_pdf_report(
+                "test_cmp_report.pdf",
+                first_input="review run1",
+                second_input="review run2",
+                mode="review",
+                first_structured_output="[DEBUG ANALYSIS]\n- A\n[CONFIDENCE SCORE]\n- 70%",
+                second_structured_output="[DEBUG ANALYSIS]\n- B\n[CONFIDENCE SCORE]\n- 80%",
+                first_label="Run 1",
+                second_label="Run 2",
+            )
+            self.assertTrue(Path(out).exists())
+        except RuntimeError:
+            self.skipTest("reportlab not available in test environment")
 
 
 if __name__ == "__main__":

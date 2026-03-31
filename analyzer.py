@@ -581,11 +581,13 @@ class RealityAnalyzer:
 
         # Guard against oversized payloads that can degrade model quality.
         code_for_prompt = cleaned_code[:2500] if len(cleaned_code) > 2500 else cleaned_code
-        print("[Code Review -> Using LLM]")
+        if self.config.dev_mode or self.config.review_logging:
+            print("[Code Review -> Using LLM]")
         started = time.perf_counter()
         pipeline = self._run_code_review_multi_agent_pipeline(code_for_prompt, language)
         elapsed = time.perf_counter() - started
-        print(f"[LLM time: {elapsed:.2f}s]")
+        if self.config.dev_mode or self.config.review_logging:
+            print(f"[LLM time: {elapsed:.2f}s]")
 
         if not pipeline.get("ok"):
             fallback_sections = self._fallback_code_review_sections(cleaned_code)
@@ -611,12 +613,14 @@ class RealityAnalyzer:
             return result
 
         response_text = str(pipeline.get("text", ""))
-        print("[RAW LLM OUTPUT]")
-        self._debug_print_safe(response_text)
+        if self.config.dev_mode or self.config.review_logging:
+            print("[RAW LLM OUTPUT]")
+            self._debug_print_safe(response_text)
         if "no high-confidence" in response_text.lower():
             response_text += "\n\nNOTE: Response may be generic due to weak prompt or model limitations."
         fixed_code = self._extract_fixed_code(response_text)
         sections = self._parse_code_review_sections(response_text)
+        sections = self._normalize_review_sections(sections)
         truncated = bool(pipeline.get("truncated"))
         if not fixed_code:
             fallback_fixed = self._generate_fixed_code_only(cleaned_code, language)
@@ -1297,6 +1301,32 @@ IMPORTANT:
         lines.append("CONFIDENCE:")
         lines.append(f"- {int(sections.get('confidence_score', 70))}%")
         return "\n".join(lines)
+
+    @staticmethod
+    def _normalize_review_sections(sections: dict[str, Any]) -> dict[str, Any]:
+        """Deduplicates and trims section items to keep output concise and stable."""
+        normalized = dict(sections)
+        for key in ("code_debug", "code_improvements", "performance", "security", "fix_suggestions", "final_summary"):
+            value = normalized.get(key, [])
+            lines: list[str] = []
+            if isinstance(value, list):
+                lines = [str(item).strip() for item in value if str(item).strip()]
+            elif isinstance(value, str) and value.strip():
+                lines = [value.strip()]
+
+            deduped: list[str] = []
+            seen: set[str] = set()
+            for line in lines:
+                canon = re.sub(r"\s+", " ", line.lower()).strip()
+                if canon in seen:
+                    continue
+                seen.add(canon)
+                deduped.append(line)
+            normalized[key] = deduped[:8]
+
+        if not normalized.get("fix_suggestions"):
+            normalized["fix_suggestions"] = normalized.get("code_improvements", [])[:3]
+        return normalized
 
     @staticmethod
     def _extract_fixed_code(response_text: str) -> str:
