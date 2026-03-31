@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import sys
 import re
 import time
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -147,7 +149,8 @@ def call_local_llm(
 ) -> dict[str, Any]:
     """Calls local Ollama and returns normalized response metadata."""
     last_status: int | None = None
-    for _ in range(max(1, retries)):
+    attempts = max(1, retries)
+    for attempt in range(attempts):
         try:
             response = requests.post(
                 url,
@@ -196,11 +199,15 @@ def call_local_llm(
                     "text": text,
                     "status_code": response.status_code,
                     "done_reason": data.get("done_reason"),
+                    "attempts": attempt + 1,
                 }
         except requests.RequestException:
-            continue
+            pass
 
-    return {"ok": False, "text": "", "status_code": last_status}
+        if attempt < attempts - 1:
+            time.sleep(0.5 * (attempt + 1))
+
+    return {"ok": False, "text": "", "status_code": last_status, "attempts": attempts}
 
 
 class RealityAnalyzer:
@@ -232,6 +239,8 @@ class RealityAnalyzer:
             "improve": True,
             "predict": True,
         }
+        self._failure_memory_path = Path("sessions") / "failure_memory.json"
+        self._failure_memory = self._load_failure_memory()
 
     def set_active_agents(self, agents: list[str]) -> list[str]:
         normalized = [item.strip().lower() for item in agents if item.strip()]
@@ -535,7 +544,10 @@ class RealityAnalyzer:
         if not self.config.use_local_llm:
             return {"ok": False, "text": "", "status_code": None}
 
-        return call_local_llm(
+        if self.config.dev_mode:
+            print("[DEBUG] Prompt sent to LLM:")
+            self._debug_print_safe(prompt[:1200])
+        response = call_local_llm(
             prompt,
             url=self.config.local_llm_url,
             model=self.config.local_llm_model,
@@ -544,56 +556,78 @@ class RealityAnalyzer:
             temperature=self.config.local_llm_temperature,
             retries=self.config.local_llm_retries,
         )
+        if self.config.dev_mode:
+            print("[DEBUG] Raw response:")
+            self._debug_print_safe(str(response.get("text", ""))[:1200] or "<empty>")
+        return response
 
     def analyze_code_multi_agent(self, code: str) -> dict[str, Any]:
         """Runs structured multi-agent style code review on provided code content."""
         cleaned_code = code.strip()
         if not cleaned_code:
             raise ValueError("Code content is empty.")
+        language = self._detect_language(cleaned_code)
 
         # Guard against oversized payloads that can degrade model quality.
         code_for_prompt = cleaned_code[:2500] if len(cleaned_code) > 2500 else cleaned_code
-        prompt = self._build_code_review_prompt(code_for_prompt)
         print("[Code Review -> Using LLM]")
         started = time.perf_counter()
-        response = self._call_local(prompt, max_new_tokens=600)
+        pipeline = self._run_code_review_multi_agent_pipeline(code_for_prompt, language)
         elapsed = time.perf_counter() - started
         print(f"[LLM time: {elapsed:.2f}s]")
 
-        if not response.get("ok"):
+        if not pipeline.get("ok"):
+            fallback_sections = self._fallback_code_review_sections(cleaned_code)
+            heuristic_fixed = self._rule_based_fixed_code(cleaned_code)
+            confidence_score = int(fallback_sections.get("confidence_score", 65))
+            self._record_failure(cleaned_code, "", "llm_unavailable")
             return {
                 "response_mode": "analysis",
-                "analysis_text": "Error: LLM not responding",
-                "system_status": ["code_review_failed"],
-                "confidence": 0.0,
-                "confidence_score": 0,
-                "debug_analysis": ["Error: LLM not responding"],
-                "improvements": ["Check local LLM service availability and retry review."],
-                "predictions": ["No performance analysis available because LLM review failed."],
-                "final_insight": ["Restore LLM connectivity first, then rerun code review."],
-                "fixed_code": "",
-                "analysis_source": "llm",
+                "analysis_text": self._compose_code_review_text(fallback_sections),
+                "system_status": ["intent=review", "source=rule-fallback", "llm_unavailable", "fixed_code_heuristic"],
+                "confidence": round(confidence_score / 100.0, 2),
+                "confidence_score": confidence_score,
+                "debug_analysis": fallback_sections.get("code_debug", []),
+                "improvements": fallback_sections.get("code_improvements", []) + fallback_sections.get("security", []),
+                "predictions": fallback_sections.get("performance", []),
+                "final_insight": fallback_sections.get("final_summary", []),
+                "fixed_code": heuristic_fixed,
+                "analysis_source": "rule",
                 "intent": "review",
-                "intent_source": "llm",
+                "intent_source": "rule",
             }
 
-        response_text = str(response.get("text", ""))
+        response_text = str(pipeline.get("text", ""))
         print("[RAW LLM OUTPUT]")
         self._debug_print_safe(response_text)
         if "no high-confidence" in response_text.lower():
             response_text += "\n\nNOTE: Response may be generic due to weak prompt or model limitations."
         fixed_code = self._extract_fixed_code(response_text)
         sections = self._parse_code_review_sections(response_text)
-        truncated = str(response.get("done_reason", "")).lower() == "length"
+        truncated = bool(pipeline.get("truncated"))
         if not fixed_code:
-            fallback_fixed = self._generate_fixed_code_only(cleaned_code)
+            fallback_fixed = self._generate_fixed_code_only(cleaned_code, language)
             if fallback_fixed:
                 fixed_code = fallback_fixed
+        repaired_from_invalid = False
+        if fixed_code and not self._is_valid_fixed_code(fixed_code, language):
+            repaired = self._repair_invalid_code(fixed_code, cleaned_code, language)
+            if repaired and self._is_valid_fixed_code(repaired, language):
+                fixed_code = repaired
+                repaired_from_invalid = True
+            else:
+                fixed_code = ""
+        if not fixed_code:
+            heuristic_fixed = self._rule_based_fixed_code(cleaned_code, language)
+            if heuristic_fixed and self._is_valid_fixed_code(heuristic_fixed, language):
+                fixed_code = heuristic_fixed
+        if not fixed_code:
+            self._record_failure(cleaned_code, response_text, "fixed_code_missing")
 
         confidence_score = int(sections.get("confidence_score", 70))
         analysis_text = self._compose_code_review_text(sections)
 
-        status = ["intent=review", "source=llm"]
+        status = ["intent=review", "source=llm", "llm_ok"]
         if len(cleaned_code) > 2500:
             status.append("code_truncated_for_review")
         if truncated:
@@ -602,6 +636,10 @@ class RealityAnalyzer:
             status.append("fixed_code_ready")
         else:
             status.append("fixed_code_missing")
+        if repaired_from_invalid:
+            status.append("fixed_code_repaired")
+        status.append(f"critic_score={pipeline.get('critic_score', 0.0):.2f}")
+        status.append(f"steps={len(pipeline.get('steps', []))}")
 
         return {
             "response_mode": "analysis",
@@ -619,31 +657,222 @@ class RealityAnalyzer:
             "intent_source": "llm",
         }
 
-    def _generate_fixed_code_only(self, original_code: str) -> str:
+    def _run_code_review_multi_agent_pipeline(self, code_for_prompt: str, language: str) -> dict[str, Any]:
+        steps: list[str] = []
+        truncated = False
+        failure_context = self._failure_context_snippet()
+
+        analyzer_prompt = (
+            "You are Analyzer Agent.\n"
+            f"Inspect the {language} code and list concrete bug/performance/security risks in short bullets.\n"
+            "Use failure memory to avoid repeated weak outputs.\n"
+            "Return plain text.\n\n"
+            f"Failure Memory:\n{failure_context}\n\n"
+            f"{code_for_prompt}"
+        )
+        analyzer_resp = self._call_local(analyzer_prompt, max_new_tokens=350)
+        if not analyzer_resp.get("ok"):
+            return {"ok": False, "text": "", "steps": ["analyzer_failed"], "critic_score": 0.0, "truncated": False}
+        analyzer_notes = str(analyzer_resp.get("text", "")).strip()
+        steps.append("analyzer")
+
+        generator_prompt = (
+            "You are Generator Agent.\n"
+            "Produce STRICT structured output with sections:\n"
+            "CODE DEBUG:\nCODE IMPROVEMENTS:\nPERFORMANCE:\nSECURITY:\nFIX SUGGESTIONS:\n"
+            "FIXED CODE:\nFINAL SUMMARY:\nCONFIDENCE:\n"
+            "Be specific.\n\n"
+            f"Failure Memory:\n{failure_context}\n\n"
+            f"Analyzer Notes:\n{analyzer_notes}\n\n"
+            f"Code:\n{code_for_prompt}"
+        )
+        generator_resp = self._call_local(generator_prompt, max_new_tokens=1000)
+        if not generator_resp.get("ok"):
+            return {"ok": False, "text": "", "steps": steps + ["generator_failed"], "critic_score": 0.0, "truncated": False}
+        candidate = str(generator_resp.get("text", "")).strip()
+        steps.append("generator")
+        if str(generator_resp.get("done_reason", "")).lower() == "length":
+            truncated = True
+
+        critic_score = 0.0
+        for loop in range(2):
+            critic_prompt = (
+                "You are Critic Agent.\n"
+                "Evaluate this review quality for specificity, section completeness, and actionable fixes.\n"
+                "Return JSON only: {\"score\": 0.0, \"issues\": [\"...\"]}\n\n"
+                f"{candidate}"
+            )
+            critic_resp = self._call_local(critic_prompt, max_new_tokens=220)
+            issues_text = ""
+            if critic_resp.get("ok"):
+                critic_payload = str(critic_resp.get("text", "")).strip()
+                match = re.search(r"\{[\s\S]*\}", critic_payload)
+                if match:
+                    try:
+                        parsed = json.loads(match.group(0))
+                        critic_score = float(parsed.get("score", 0.0))
+                        issues = parsed.get("issues", [])
+                        if isinstance(issues, list):
+                            issues_text = "\n".join(f"- {str(i)}" for i in issues[:8])
+                    except (ValueError, TypeError):
+                        critic_score = 0.0
+            steps.append(f"critic_{loop+1}")
+            if critic_score >= 0.75:
+                break
+
+            fixer_prompt = (
+                "You are Fixer Agent.\n"
+                "Improve the review text below.\n"
+                "- Keep exact required sections\n"
+                "- Increase specificity\n"
+                f"- Ensure FIXED CODE is complete and valid {language} code\n\n"
+                f"Critic Issues:\n{issues_text or '- low confidence'}\n\n"
+                f"Review Text:\n{candidate}\n\n"
+                f"Original Code:\n{code_for_prompt}"
+            )
+            fixer_resp = self._call_local(fixer_prompt, max_new_tokens=1200)
+            if not fixer_resp.get("ok"):
+                break
+            candidate = str(fixer_resp.get("text", "")).strip()
+            steps.append(f"fixer_{loop+1}")
+            if str(fixer_resp.get("done_reason", "")).lower() == "length":
+                truncated = True
+
+        return {
+            "ok": True,
+            "text": candidate,
+            "steps": steps,
+            "critic_score": critic_score,
+            "truncated": truncated,
+        }
+
+    def _generate_fixed_code_only(self, original_code: str, language: str) -> str:
         code_for_prompt = original_code[:2200] if len(original_code) > 2200 else original_code
         prompt = (
-            "You are a senior Python engineer.\n"
-            "Return a fully corrected version of this code.\n"
+            f"You are a senior {language} engineer.\n"
+            f"Return a fully corrected version of this {language} code.\n"
             "Rules:\n"
-            "- Return only Python code\n"
+            f"- Return only {language} code\n"
             "- No markdown, no explanations\n"
+            f"- Ensure code is syntactically valid {language}\n"
             "- Preserve intent while fixing bugs, edge cases, and robustness\n\n"
             f"{code_for_prompt}\n"
         )
-        response = self._call_local(prompt, max_new_tokens=900)
+
+        best_candidate = ""
+        for token_budget in (900, 1200, 1500):
+            response = self._call_local(prompt, max_new_tokens=token_budget)
+            if not response.get("ok"):
+                continue
+            text = str(response.get("text", "")).strip()
+            candidate = self._extract_code_candidate(text)
+            if candidate and len(candidate) > len(best_candidate):
+                best_candidate = candidate
+            if candidate and self._is_valid_fixed_code(candidate, language):
+                return candidate
+
+            if str(response.get("done_reason", "")).lower() == "length" and candidate:
+                continuation = self._continue_fixed_code(candidate, code_for_prompt, language)
+                if continuation and self._is_valid_fixed_code(continuation, language):
+                    return continuation
+                if continuation and len(continuation) > len(best_candidate):
+                    best_candidate = continuation
+
+        return best_candidate
+
+    def _continue_fixed_code(self, partial_code: str, original_code: str, language: str) -> str:
+        prompt = (
+            f"Continue and complete this {language} code so it becomes syntactically valid.\n"
+            "Return full corrected code only.\n"
+            "No markdown.\n\n"
+            "ORIGINAL CODE:\n"
+            f"{original_code[:1800]}\n\n"
+            "PARTIAL FIXED CODE:\n"
+            f"{partial_code}\n"
+        )
+        response = self._call_local(prompt, max_new_tokens=1400)
         if not response.get("ok"):
             return ""
         text = str(response.get("text", "")).strip()
+        return self._extract_code_candidate(text)
+
+    def _repair_invalid_code(self, invalid_code: str, original_code: str, language: str) -> str:
+        prompt = (
+            f"Repair syntax errors in this {language} code.\n"
+            f"Return only valid {language} code. No markdown.\n"
+            "Preserve behavior while fixing syntax.\n\n"
+            "ORIGINAL CODE:\n"
+            f"{original_code[:1800]}\n\n"
+            "INVALID FIXED CODE:\n"
+            f"{invalid_code}\n"
+        )
+        response = self._call_local(prompt, max_new_tokens=1400)
+        if not response.get("ok"):
+            return ""
+        return self._extract_code_candidate(str(response.get("text", "")).strip())
+
+    @staticmethod
+    def _extract_code_candidate(text: str) -> str:
         if not text:
             return ""
-
-        fenced = re.search(r"```(?:python)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE)
+        fenced = re.search(r"```(?:[a-zA-Z0-9_+\-#.]*)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE)
         if fenced:
             return fenced.group(1).strip()
-
-        cleaned = re.sub(r"^\s*```(?:python)?\s*", "", text, flags=re.IGNORECASE)
+        cleaned = re.sub(r"^\s*```(?:[a-zA-Z0-9_+\-#.]*)?\s*", "", text, flags=re.IGNORECASE)
         cleaned = re.sub(r"\s*```\s*$", "", cleaned, flags=re.IGNORECASE)
         return cleaned.strip()
+
+    @staticmethod
+    def _is_valid_python_code(code: str) -> bool:
+        text = code.strip()
+        if not text:
+            return False
+        try:
+            ast.parse(text)
+            return True
+        except SyntaxError:
+            return False
+
+    def _is_valid_fixed_code(self, code: str, language: str) -> bool:
+        text = code.strip()
+        if not text:
+            return False
+        if language == "python":
+            return self._is_valid_python_code(text)
+        # Non-Python: apply lightweight generic validity checks.
+        if len(text) < 8:
+            return False
+        if text.count("{") != text.count("}"):
+            return False
+        if text.count("(") != text.count(")"):
+            return False
+        return True
+
+    @staticmethod
+    def _rule_based_fixed_code(original_code: str, language: str) -> str:
+        """Applies conservative heuristic fixes when LLM is unavailable."""
+        if language != "python":
+            return original_code
+        fixed = original_code
+
+        # Bubble-sort loop bound fix: for j in range(n) -> for j in range(n - i - 1)
+        fixed = re.sub(
+            r"for\s+j\s+in\s+range\(\s*n\s*\)\s*:",
+            "for j in range(n - i - 1):",
+            fixed,
+        )
+
+        # Guard find_max against empty input where it directly reads arr[0].
+        find_max_pattern = re.compile(
+            r"(def\s+find_max\s*\(\s*arr\s*\)\s*:\s*\n)([ \t]+)(max_val\s*=\s*arr\[0\])",
+            flags=re.MULTILINE,
+        )
+        fixed = find_max_pattern.sub(
+            r"\1\2if not arr:\n\2    return None\n\2\3",
+            fixed,
+        )
+
+        return fixed
 
     @staticmethod
     def _debug_print_safe(text: str) -> None:
@@ -657,15 +886,80 @@ class RealityAnalyzer:
         safe = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
         print(safe)
 
+    def _load_failure_memory(self) -> list[dict[str, str]]:
+        try:
+            if not self._failure_memory_path.exists():
+                return []
+            data = json.loads(self._failure_memory_path.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return [item for item in data if isinstance(item, dict)][-30:]
+        except (OSError, ValueError, TypeError):
+            pass
+        return []
+
+    def _save_failure_memory(self) -> None:
+        try:
+            self._failure_memory_path.parent.mkdir(parents=True, exist_ok=True)
+            self._failure_memory_path.write_text(
+                json.dumps(self._failure_memory[-30:], indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            return
+
+    def _record_failure(self, user_input: str, bad_output: str, reason: str) -> None:
+        self._failure_memory.append(
+            {
+                "input": user_input[:500],
+                "bad_output": bad_output[:800],
+                "failure_reason": reason[:200],
+            }
+        )
+        self._save_failure_memory()
+
+    def _failure_context_snippet(self) -> str:
+        if not self._failure_memory:
+            return "none"
+        recent = self._failure_memory[-3:]
+        lines = []
+        for item in recent:
+            lines.append(
+                f"- input={item.get('input','')[:80]} | reason={item.get('failure_reason','')[:80]}"
+            )
+        return "\n".join(lines)
+
     @staticmethod
-    def _build_code_review_prompt(code: str) -> str:
+    def _detect_language(code: str) -> str:
+        text = code.strip()
+        lower = text.lower()
+        if "def " in lower or "import " in lower or "if __name__ ==" in lower:
+            return "python"
+        if "console.log" in lower or "function " in lower or ("=>" in lower and "{" in lower):
+            return "javascript"
+        if "public static void main" in lower or "system.out.println" in lower:
+            return "java"
+        if "#include" in lower or "printf(" in lower or "scanf(" in lower:
+            return "c"
+        if "cout <<" in lower or "std::" in lower:
+            return "cpp"
+        if "package main" in lower or "fmt.println" in lower:
+            return "go"
+        if "select " in lower and " from " in lower:
+            return "sql"
+        return "code"
+
+    def _build_code_review_prompt(self, code: str, language: str) -> str:
+        failure_context = self._failure_context_snippet()
         return f"""
-You are a senior Python software engineer performing a deep and practical code review.
+You are a senior software engineer performing a deep and practical {language} code review.
 
 Analyze the following code carefully and provide actionable insights.
 
 CODE:
 {code}
+
+RECENT FAILURE MEMORY (use this to avoid repeating weak behavior):
+{failure_context}
 
 ---
 
@@ -704,7 +998,7 @@ FIX SUGGESTIONS:
 - Show before -> after where possible
 
 FIXED CODE:
-Return full corrected version of the code.
+Return full corrected version of the {language} code.
 
 FINAL SUMMARY:
 - Most important issue to fix first
@@ -754,9 +1048,17 @@ IMPORTANT:
             return cleaned
 
         current: str | None = None
+        in_code_block = False
         for raw in text.splitlines():
             line = raw.strip()
             if not line:
+                continue
+            if line.startswith("```"):
+                in_code_block = not in_code_block
+                continue
+            if in_code_block:
+                continue
+            if re.fullmatch(r"[-=_]{3,}", line):
                 continue
             normalized_header = _normalize_header(line)
             if normalized_header in header_aliases:
@@ -767,6 +1069,7 @@ IMPORTANT:
             item = re.sub(r"^[>\-\*\u2022]+\s*", "", line).strip()
             item = item.strip("*").strip()
             item = item.replace("**", "").strip()
+            item = re.sub(r"^\d+\.\s*", "", item)
             if item:
                 sections[current].append(item)
 
@@ -812,6 +1115,13 @@ IMPORTANT:
             stripped = line.strip()
             if "except:" in line_lower:
                 code_debug.append(f"Line {idx}: bare except hides real failures and complicates debugging.")
+            if re.search(r"\bfor\s+\w+\s+in\s+range\(\s*n\s*\)\s*:", line_lower):
+                code_debug.append(f"Line {idx}: full-range inner loop can cause index errors in adjacent access patterns.")
+                improvements.append(f"Line {idx}: use range(n - i - 1) for bubble-sort style loops.")
+                performance.append(f"Line {idx}: reduce unnecessary iterations by shrinking loop bounds.")
+            if re.search(r"\[[^\]]*\+\s*1\]", line):
+                code_debug.append(f"Line {idx}: adjacent index access may overflow at list boundaries.")
+                improvements.append(f"Line {idx}: add bounds-safe loop limits before using index+1.")
             if "eval(" in line_lower:
                 security.append(f"Line {idx}: eval() is unsafe with untrusted input.")
             if "exec(" in line_lower:
