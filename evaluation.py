@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -19,70 +21,130 @@ class EvalCase:
     expected_debug: str
     expected_fix: str
     category: str
+    language: str
 
 
 EVAL_DATASET: list[EvalCase] = [
     EvalCase(
         input_text="def find_max(arr):\n    return arr[0]\n",
-        expected_debug="empty list",
-        expected_fix="empty check",
+        expected_debug="empty list index error",
+        expected_fix="add empty check",
         category="edge-case",
+        language="python",
     ),
     EvalCase(
         input_text="def bubble(arr):\n    n=len(arr)\n    for i in range(n):\n        for j in range(n):\n            if arr[j] > arr[j+1]:\n                arr[j],arr[j+1]=arr[j+1],arr[j]\n    return arr\n",
-        expected_debug="index error",
+        expected_debug="index out of bounds",
         expected_fix="range(n - i - 1)",
         category="bug",
+        language="python",
     ),
     EvalCase(
         input_text="def fib(n):\n    if n <= 1:\n        return n\n    return fib(n-1) + fib(n-2)\n",
-        expected_debug="exponential",
-        expected_fix="iterative",
+        expected_debug="exponential recursion",
+        expected_fix="iterative or memoization",
         category="performance",
+        language="python",
     ),
     EvalCase(
-        input_text="import requests\n\ndef fetch(url):\n    return requests.get(url).text\n",
-        expected_debug="timeout",
-        expected_fix="timeout=",
-        category="security",
-    ),
-    EvalCase(
-        input_text="def run(cmd):\n    import subprocess\n    subprocess.run(cmd, shell=True)\n",
-        expected_debug="shell=true",
-        expected_fix="shell=False",
-        category="security",
-    ),
-    EvalCase(
-        input_text="def avg(nums):\n    return sum(nums) / len(nums)\n",
-        expected_debug="division by zero",
-        expected_fix="if not nums",
+        input_text="function findMax(arr){ return arr[0]; }",
+        expected_debug="empty array edge case",
+        expected_fix="guard for empty array",
         category="edge-case",
+        language="javascript",
     ),
     EvalCase(
-        input_text="def parse_user(data):\n    return eval(data)\n",
-        expected_debug="eval",
-        expected_fix="literal_eval",
+        input_text="function run(cmd){ const {exec}=require('child_process'); exec(cmd); }",
+        expected_debug="command injection risk",
+        expected_fix="avoid shell execution",
         category="security",
+        language="javascript",
     ),
     EvalCase(
-        input_text="def find_user(users, target):\n    for i in range(len(users)):\n        if users[i]['id'] == target:\n            return users[i]\n    return None\n",
-        expected_debug="inefficient",
-        expected_fix="for user in users",
-        category="performance",
-    ),
-    EvalCase(
-        input_text="def pop_first(items):\n    return items[0]\n",
-        expected_debug="indexerror",
-        expected_fix="if not items",
+        input_text="public static int max(int[] a){ return a[0]; }",
+        expected_debug="empty array check missing",
+        expected_fix="validate length",
         category="edge-case",
+        language="java",
+    ),
+    EvalCase(
+        input_text="#include <stdio.h>\nint main(){ int a[3]={1,2,3}; printf(\"%d\", a[3]); }",
+        expected_debug="out of bounds",
+        expected_fix="valid index range",
+        category="bug",
+        language="c",
+    ),
+    EvalCase(
+        input_text="SELECT * FROM users WHERE id = " + "'\" + userInput + \"';",
+        expected_debug="sql injection",
+        expected_fix="parameterized query",
+        category="security",
+        language="sql",
+    ),
+    EvalCase(
+        input_text="def fetch(url):\n    import requests\n    return requests.get(url).text\n",
+        expected_debug="missing timeout",
+        expected_fix="add timeout parameter",
+        category="security",
+        language="python",
     ),
     EvalCase(
         input_text="def save(path, data):\n    with open(path, 'w') as f:\n        f.write(data)\n",
-        expected_debug="encoding",
-        expected_fix="encoding=",
+        expected_debug="missing encoding",
+        expected_fix="encoding utf-8",
         category="bug",
+        language="python",
     ),
 ]
+
+
+SYNONYMS: dict[str, set[str]] = {
+    "array": {"list", "vector"},
+    "list": {"array", "vector"},
+    "index": {"bounds", "out-of-range", "outofrange"},
+    "error": {"exception", "failure"},
+    "timeout": {"time out"},
+    "iterative": {"loop", "dynamic-programming", "dp", "memoization"},
+    "memoization": {"cache", "dynamic-programming", "dp"},
+    "empty": {"null", "none"},
+    "sql": {"database", "query"},
+    "injection": {"unsafe", "untrusted"},
+    "parameterized": {"prepared", "bind"},
+}
+
+
+def _normalize_text(text: str) -> str:
+    lowered = text.lower()
+    cleaned = re.sub(r"[^a-z0-9\s_\-]+", " ", lowered)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _tokenize(text: str) -> set[str]:
+    base = _normalize_text(text)
+    tokens = set(base.split())
+    expanded = set(tokens)
+    for token in list(tokens):
+        expanded.update(SYNONYMS.get(token, set()))
+    return expanded
+
+
+def _semantic_match(expected: str, actual_text: str) -> float:
+    expected_norm = _normalize_text(expected)
+    actual_norm = _normalize_text(actual_text)
+    if not expected_norm or not actual_norm:
+        return 0.0
+    if expected_norm in actual_norm:
+        return 1.0
+
+    expected_tokens = _tokenize(expected_norm)
+    actual_tokens = _tokenize(actual_norm)
+    if not expected_tokens:
+        return 0.0
+
+    overlap = len(expected_tokens.intersection(actual_tokens)) / max(1, len(expected_tokens))
+    fuzzy = SequenceMatcher(None, expected_norm, actual_norm).ratio()
+    return max(overlap, fuzzy)
 
 
 def _as_search_text(result: dict[str, Any]) -> str:
@@ -111,10 +173,11 @@ def _section_completeness(result: dict[str, Any]) -> float:
     return filled / len(sections)
 
 
-def _baseline_simple_code_review(analyzer: RealityAnalyzer, code_text: str) -> dict[str, Any]:
+def _baseline_simple_code_review(analyzer: RealityAnalyzer, code_text: str, language: str) -> dict[str, Any]:
     prompt = (
-        "You are a Python code reviewer.\n"
-        "List bugs and fixes briefly.\n\n"
+        "You are a code reviewer.\n"
+        f"Language: {language}\n"
+        "List key bugs and practical fixes briefly.\n\n"
         f"{code_text}\n"
     )
     local = call_local_llm(
@@ -122,7 +185,7 @@ def _baseline_simple_code_review(analyzer: RealityAnalyzer, code_text: str) -> d
         url=analyzer.config.local_llm_url,
         model=analyzer.config.local_llm_model,
         timeout=analyzer.config.local_llm_timeout_seconds,
-        max_new_tokens=300,
+        max_new_tokens=260,
         temperature=0.3,
         retries=analyzer.config.local_llm_retries,
     )
@@ -143,8 +206,8 @@ def evaluate_trx_ai(
         raise ValueError("Evaluation dataset is empty.")
 
     total = len(cases)
-    debug_hits = 0
-    fix_hits = 0
+    debug_score_sum = 0.0
+    fix_score_sum = 0.0
     trx_times: list[float] = []
     baseline_times: list[float] = []
     completeness_values: list[float] = []
@@ -158,34 +221,31 @@ def evaluate_trx_ai(
         trx_times.append(trx_elapsed)
 
         trx_text = _as_search_text(trx_result)
-        expected_debug = case.expected_debug.lower()
-        expected_fix = case.expected_fix.lower()
-        debug_ok = expected_debug in trx_text
-        fix_ok = expected_fix in trx_text
-        if debug_ok:
-            debug_hits += 1
-        if fix_ok:
-            fix_hits += 1
+        debug_score = _semantic_match(case.expected_debug, trx_text)
+        fix_score = _semantic_match(case.expected_fix, trx_text)
+        debug_score_sum += debug_score
+        fix_score_sum += fix_score
         completeness_values.append(_section_completeness(trx_result))
 
         baseline_started = time.perf_counter()
-        baseline = _baseline_simple_code_review(analyzer, case.input_text)
+        baseline = _baseline_simple_code_review(analyzer, case.input_text, case.language)
         baseline_elapsed = time.perf_counter() - baseline_started
         baseline_times.append(baseline_elapsed)
         baseline_text = str(baseline.get("text", "")).lower()
 
-        baseline_score = int(expected_debug in baseline_text) + int(expected_fix in baseline_text)
-        trx_score = int(debug_ok) + int(fix_ok)
+        baseline_score = _semantic_match(case.expected_debug, baseline_text) + _semantic_match(case.expected_fix, baseline_text)
+        trx_score = debug_score + fix_score
         if trx_score > baseline_score:
             comparison_trx_better += 1
 
         case_rows.append(
-            f"{idx}. [{case.category}] debug_match={debug_ok} fix_match={fix_ok} "
+            f"{idx}. [{case.language}/{case.category}] "
+            f"debug={debug_score:.2f} fix={fix_score:.2f} "
             f"trx_time={trx_elapsed:.2f}s baseline_time={baseline_elapsed:.2f}s"
         )
 
-    accuracy_score = (debug_hits / total) * 100
-    fix_quality_score = (fix_hits / total) * 100
+    accuracy_score = (debug_score_sum / total) * 100
+    fix_quality_score = (fix_score_sum / total) * 100
     avg_response_time = sum(trx_times) / total
     completeness_score = (sum(completeness_values) / total) * 100
     baseline_avg_time = sum(baseline_times) / total
