@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import hashlib
 from pathlib import Path
 from typing import Any, Callable
 
@@ -28,6 +29,7 @@ class CodeChangeHandler(FileSystemEventHandler):
         self.fix_writer = fix_writer
         self.debounce_seconds = debounce_seconds
         self._last_seen: dict[str, float] = {}
+        self._last_hash: dict[str, str] = {}
 
     def on_modified(self, event: FileSystemEvent) -> None:
         if event.is_directory:
@@ -52,6 +54,9 @@ class CodeChangeHandler(FileSystemEventHandler):
 
         if not code.strip():
             print("[Watcher] Skipping empty file.")
+            return
+        if self._is_unchanged_content(src_path, code):
+            print("[Watcher] Skipping unchanged content.")
             return
 
         try:
@@ -100,6 +105,12 @@ class CodeChangeHandler(FileSystemEventHandler):
         self._last_seen[src_path] = now
         return False
 
+    def _is_unchanged_content(self, src_path: str, code: str) -> bool:
+        current_hash = hashlib.sha1(code.encode("utf-8", errors="replace")).hexdigest()
+        last_hash = self._last_hash.get(src_path)
+        self._last_hash[src_path] = current_hash
+        return last_hash == current_hash
+
 
 def start_watcher(
     path: str,
@@ -126,4 +137,3 @@ def start_watcher(
     observer.schedule(event_handler, str(watch_path), recursive=True)
     observer.start()
     return observer
-

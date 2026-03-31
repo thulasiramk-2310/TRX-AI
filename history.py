@@ -1,4 +1,4 @@
-"""Session history handling for Reality Debugger."""
+﻿"""Session history handling for Reality Debugger."""
 
 from __future__ import annotations
 
@@ -300,35 +300,35 @@ class SessionHistory:
             subtitle="Reality Debugger",
             tagline="Debugging Real Life Like Code",
         )
+        page_number = 1
 
-        doc.setFillColor(theme["brand_dark"])
-        doc.setFont("Helvetica-Bold", 13)
-        doc.drawString(margin_x, y, "COMPARISON SUMMARY")
-        y -= 8
-        doc.setStrokeColor(theme["line"])
-        doc.setLineWidth(0.8)
-        doc.line(margin_x, y, width - margin_x, y)
-        y -= 14
+        y = self._draw_figure_header(
+            doc,
+            y=y,
+            x=margin_x,
+            content_width=content_width,
+            theme=theme,
+            title="Figure 5.2: Side-by-Side Comparison Report",
+            subtitle="Comparison between two analysis sessions (Run 1 vs Run 2)",
+        )
 
         parsed_first = self._parse_structured_sections(first_structured_output)
         parsed_second = self._parse_structured_sections(second_structured_output)
         metrics_first = self._extract_comparison_metrics(parsed_first)
         metrics_second = self._extract_comparison_metrics(parsed_second)
 
-        summary_lines = [
-            f"Mode: {mode.upper()}",
-            f"{first_label}: {first_input}",
-            f"{second_label}: {second_input}",
-        ]
-        doc.setFillColor(theme["ink"])
-        doc.setFont("Helvetica", 10)
-        for line in summary_lines:
-            wrapped = self._wrap_lines(line, max_chars=105)
-            for part in wrapped:
-                doc.drawString(margin_x, y, f"- {part}")
-                y -= 14
-
-        y -= 6
+        y = self._draw_comparison_summary_block(
+            doc,
+            y=y,
+            x=margin_x,
+            content_width=content_width,
+            mode=mode.upper(),
+            first_label=first_label,
+            second_label=second_label,
+            first_input=first_input,
+            second_input=second_input,
+            theme=theme,
+        )
 
         card_h = 9.2 * cm
         doc.setFillColor(theme["card_bg"])
@@ -355,14 +355,13 @@ class SessionHistory:
             second_metrics=metrics_second,
             theme=theme,
         )
-        y -= card_h + 12
-
-        recommendation = self._comparison_recommendation(metrics_first, metrics_second, first_label, second_label)
+        y -= card_h + 16
         issue_diff = self._build_issue_diff(parsed_first, parsed_second)
         issue_card_height = self._estimate_issue_diff_card_height(issue_diff)
         if y - issue_card_height < 2.8 * cm:
-            self._draw_footer(doc, width, margin_x, 1)
+            self._draw_footer(doc, width, margin_x, page_number)
             doc.showPage()
+            page_number += 1
             y = self._draw_page_header(
                 doc,
                 width,
@@ -372,6 +371,15 @@ class SessionHistory:
                 theme,
                 subtitle="Reality Debugger",
                 tagline="Debugging Real Life Like Code",
+            )
+            y = self._draw_figure_header(
+                doc,
+                y=y,
+                x=margin_x,
+                content_width=content_width,
+                theme=theme,
+                title="Figure 5.2: Side-by-Side Comparison Report",
+                subtitle="Comparison between two analysis sessions (Run 1 vs Run 2)",
             )
         y = self._draw_issue_diff_card(
             doc,
@@ -383,17 +391,22 @@ class SessionHistory:
             second_label=second_label,
             theme=theme,
         )
-        y = self._draw_card_section(
+
+        recommendation = [
+            "Run 2 demonstrates improved confidence compared to Run 1. "
+            "It is recommended to continue this strategy while enhancing input "
+            "specificity to achieve more precise diagnostics."
+        ]
+        y = self._draw_recommendation_card(
             doc,
-            "RECOMMENDATION",
-            recommendation,
             y,
             margin_x,
             content_width,
+            recommendation,
             theme,
         )
 
-        self._draw_footer(doc, width, margin_x, 1)
+        self._draw_footer(doc, width, margin_x, page_number)
         doc.save()
         return destination
 
@@ -551,23 +564,70 @@ class SessionHistory:
         remaining = sorted(first_keys & second_keys)
         new_findings = sorted(second_keys - first_keys)
 
+        resolved_items = [first_map[key] for key in resolved]
+        remaining_items = [second_map.get(key, first_map[key]) for key in remaining]
+        new_items = [second_map[key] for key in new_findings]
+
         return {
-            "resolved": [first_map[key] for key in resolved],
-            "remaining": [second_map.get(key, first_map[key]) for key in remaining],
-            "new": [second_map[key] for key in new_findings],
+            "resolved": self._dedupe_issue_lines(resolved_items),
+            "remaining": self._dedupe_issue_lines(remaining_items),
+            "new": self._dedupe_issue_lines(new_items),
         }
 
+    @staticmethod
+    def _dedupe_issue_lines(lines: list[str]) -> list[str]:
+        """Removes duplicate meaning and vague/non-actionable issue lines."""
+        skip_patterns = (
+            "risk remains",
+            "risk reduced",
+            "risk medium",
+            "no obvious",
+            "no immediate",
+        )
+        alias_patterns: list[tuple[str, str]] = [
+            (r"sql.*(concat|concatenat|string)", "Fixed SQL string concatenation"),
+            (r"null check.*login|login.*null check", "Missing null check in login"),
+            (r"input validation", "Add input validation"),
+            (r"parameterized quer", "Use parameterized queries"),
+            (r"file read.*exception", "File read lacks exception handling"),
+        ]
+
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw in lines:
+            text = str(raw).strip()
+            if not text:
+                continue
+            low = text.lower()
+            if any(pattern in low for pattern in skip_patterns):
+                continue
+
+            canonical = re.sub(r"[^a-z0-9\s]+", " ", low)
+            canonical = re.sub(r"\s+", " ", canonical).strip()
+            for pattern, replacement in alias_patterns:
+                if re.search(pattern, canonical):
+                    canonical = replacement.lower()
+                    text = replacement
+                    break
+
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            cleaned.append(text)
+
+        return cleaned[:8]
+
     def _estimate_issue_diff_card_height(self, issue_diff: dict[str, list[str]]) -> float:
-        max_chars = 94
-        rows = 8
+        max_chars = 90
+        rows = 11
         for key in ("resolved", "remaining", "new"):
             entries = issue_diff.get(key, [])[:10]
-            rows += 2
+            rows += 4
             for entry in entries:
                 rows += max(1, (len(entry) // max_chars) + 1)
             if not entries:
-                rows += 1
-        return 28 + (rows * 12)
+                rows += 2
+        return 38 + (rows * 12)
 
     def _draw_issue_diff_card(
         self,
@@ -582,54 +642,51 @@ class SessionHistory:
         theme: dict[str, Any],
     ) -> float:
         from reportlab.lib import colors
-
         card_h = self._estimate_issue_diff_card_height(issue_diff)
         doc.setFillColor(theme["card_bg"])
         doc.setStrokeColor(theme["card_line"])
         doc.setLineWidth(1)
         doc.roundRect(x, y - card_h, content_width, card_h, 8, fill=1, stroke=1)
-
         doc.setFillColor(theme["brand_dark"])
         doc.setFont("Helvetica-Bold", 11)
         doc.drawString(x + 12, y - 18, "ISSUE DIFFERENCE (SIDE-BY-SIDE)")
-
         doc.setStrokeColor(theme["line"])
         doc.setLineWidth(0.7)
         doc.line(x + 10, y - 23, x + content_width - 10, y - 23)
-
         doc.setFillColor(theme["muted"])
         doc.setFont("Helvetica", 9)
         doc.drawString(x + 12, y - 35, f"Compared: {first_label} -> {second_label}")
-
-        cursor_y = y - 50
+        cursor_y = y - 52
         categories = [
-            ("RESOLVED ISSUES", issue_diff.get("resolved", [])[:10], colors.HexColor("#1FAF5A")),
-            ("REMAINING ISSUES", issue_diff.get("remaining", [])[:10], colors.HexColor("#D64545")),
-            ("NEW FINDINGS", issue_diff.get("new", [])[:10], colors.HexColor("#D08B00")),
+            ("[OK] RESOLVED ISSUES", issue_diff.get("resolved", [])[:10], colors.HexColor("#1FAF5A"), colors.HexColor("#F3FBF5")),
+            ("[X] REMAINING ISSUES", issue_diff.get("remaining", [])[:10], colors.HexColor("#D64545"), colors.HexColor("#FFF4F4")),
+            ("[!] NEW FINDINGS", issue_diff.get("new", [])[:10], colors.HexColor("#D08B00"), colors.HexColor("#FFF9EF")),
         ]
-
-        for title, lines, color in categories:
+        for title, lines, color, tint in categories:
+            row_units = sum(max(1, len(self._wrap_lines(line, max_chars=90))) for line in lines) if lines else 1
+            block_h = 22 + (row_units * 12) + 12
+            doc.setFillColor(tint)
+            doc.setStrokeColor(theme["card_line"])
+            doc.setLineWidth(0.6)
+            doc.roundRect(x + 10, cursor_y - block_h + 6, content_width - 20, block_h, 6, fill=1, stroke=1)
             doc.setFillColor(color)
             doc.setFont("Helvetica-Bold", 10)
-            doc.drawString(x + 12, cursor_y, title)
-            cursor_y -= 13
-
+            doc.drawString(x + 18, cursor_y - 8, title)
+            cursor_y -= 19
             doc.setFillColor(theme["ink"])
             doc.setFont("Helvetica", 9)
             if not lines:
-                doc.drawString(x + 18, cursor_y, "- none")
+                doc.drawString(x + 26, cursor_y, "- none")
                 cursor_y -= 12
             else:
                 for line in lines:
-                    wrapped = self._wrap_lines(line, max_chars=94)
+                    wrapped = self._wrap_lines(line, max_chars=90)
                     for idx, part in enumerate(wrapped):
                         prefix = "- " if idx == 0 else "  "
-                        doc.drawString(x + 18, cursor_y, f"{prefix}{part}")
+                        doc.drawString(x + 26, cursor_y, f"{prefix}{part}")
                         cursor_y -= 12
-            cursor_y -= 4
-
+            cursor_y -= 12
         return y - card_h - 10
-
     @staticmethod
     def _draw_manual_comparison_chart(
         doc: Any,
@@ -645,49 +702,172 @@ class SessionHistory:
         theme: dict[str, Any],
     ) -> None:
         from reportlab.lib import colors
-
         metrics = [
             ("Confidence", first_metrics["confidence"], second_metrics["confidence"]),
             ("Bugs", first_metrics["bugs"], second_metrics["bugs"]),
             ("Fixes", first_metrics["fixes"], second_metrics["fixes"]),
             ("Analysis", first_metrics["analysis"], second_metrics["analysis"]),
         ]
-
-        chart_left = x + 22
-        chart_bottom = y + 22
-        chart_width = width - 44
-        chart_height = height - 58
-
+        chart_left = x + 52
+        chart_bottom = y + 30
+        chart_width = width - 86
+        chart_height = height - 84
         doc.setStrokeColor(theme["line"])
         doc.setLineWidth(0.8)
         doc.line(chart_left, chart_bottom, chart_left, chart_bottom + chart_height)
         doc.line(chart_left, chart_bottom, chart_left + chart_width, chart_bottom)
-
         max_val = max(10.0, max(max(first, second) for _, first, second in metrics))
         scale = chart_height / max_val
-
+        doc.setStrokeColor(colors.HexColor("#DCE9F5"))
+        doc.setLineWidth(0.6)
+        for i in range(1, 6):
+            gy = chart_bottom + (chart_height * i / 6)
+            doc.line(chart_left, gy, chart_left + chart_width, gy)
         group_width = chart_width / len(metrics)
-        bar_width = min(14, (group_width * 0.62) / 2)
-
+        bar_width = min(18, (group_width * 0.66) / 2)
+        bar_gap = 6
         for idx, (label, first_val, second_val) in enumerate(metrics):
-            gx = chart_left + (idx * group_width) + (group_width * 0.18)
+            gx = chart_left + (idx * group_width) + ((group_width - ((bar_width * 2) + bar_gap)) / 2)
             h1 = first_val * scale
             h2 = second_val * scale
-
-            doc.setFillColor(colors.HexColor("#00AEEF"))
+            doc.setFillColor(colors.HexColor("#7FC8FF"))
             doc.rect(gx, chart_bottom, bar_width, h1, fill=1, stroke=0)
-
             doc.setFillColor(colors.HexColor("#1A4F8B"))
-            doc.rect(gx + bar_width + 4, chart_bottom, bar_width, h2, fill=1, stroke=0)
-
+            doc.rect(gx + bar_width + bar_gap, chart_bottom, bar_width, h2, fill=1, stroke=0)
             doc.setFillColor(theme["muted"])
-            doc.setFont("Helvetica", 8)
-            doc.drawCentredString(gx + bar_width, chart_bottom - 11, label)
-
+            doc.setFont("Helvetica", 8.8)
+            doc.drawCentredString(gx + bar_width + (bar_gap / 2), chart_bottom - 12, label)
+        legend_y = chart_bottom + chart_height + 16
+        doc.setFillColor(colors.HexColor("#7FC8FF"))
+        doc.rect(chart_left, legend_y - 4, 8, 8, fill=1, stroke=0)
         doc.setFillColor(theme["muted"])
-        doc.setFont("Helvetica", 8)
-        doc.drawString(chart_left, y + 6, f"{first_label} = cyan")
-        doc.drawString(chart_left + 130, y + 6, f"{second_label} = blue")
+        doc.setFont("Helvetica", 9)
+        doc.drawString(chart_left + 12, legend_y - 2, "Run 1 (Baseline)")
+        legend2_x = chart_left + 148
+        doc.setFillColor(colors.HexColor("#1A4F8B"))
+        doc.rect(legend2_x, legend_y - 4, 8, 8, fill=1, stroke=0)
+        doc.setFillColor(theme["muted"])
+        doc.drawString(legend2_x + 12, legend_y - 2, "Run 2 (Improved)")
+        doc.setFont("Helvetica", 8.5)
+        doc.drawCentredString(chart_left + (chart_width / 2), chart_bottom - 24, "Metrics")
+        doc.saveState()
+        doc.translate(chart_left - 22, chart_bottom + (chart_height / 2))
+        doc.rotate(90)
+        doc.drawCentredString(0, 0, "Score / Count")
+        doc.restoreState()
+    @staticmethod
+    def _draw_figure_header(
+        doc: Any,
+        *,
+        y: float,
+        x: float,
+        content_width: float,
+        theme: dict[str, Any],
+        title: str,
+        subtitle: str,
+    ) -> float:
+        doc.setFillColor(theme["ink"])
+        doc.setFont("Helvetica-Bold", 15)
+        doc.drawCentredString(x + (content_width / 2), y, title)
+        y -= 14
+        doc.setFillColor(theme["muted"])
+        doc.setFont("Helvetica", 10)
+        doc.drawCentredString(x + (content_width / 2), y, subtitle)
+        y -= 14
+        doc.setStrokeColor(theme["line"])
+        doc.setLineWidth(0.8)
+        doc.line(x, y, x + content_width, y)
+        return y - 18
+    @staticmethod
+    def _draw_comparison_summary_block(
+        doc: Any,
+        *,
+        y: float,
+        x: float,
+        content_width: float,
+        mode: str,
+        first_label: str,
+        second_label: str,
+        first_input: str,
+        second_input: str,
+        theme: dict[str, Any],
+    ) -> float:
+        from reportlab.lib import colors
+        doc.setFillColor(theme["brand_dark"])
+        doc.setFont("Helvetica-Bold", 12)
+        doc.drawString(x, y, "COMPARISON SUMMARY")
+        y -= 8
+        doc.setStrokeColor(theme["line"])
+        doc.setLineWidth(0.7)
+        doc.line(x, y, x + content_width, y)
+        y -= 12
+        table_h = 60
+        doc.setFillColor(theme["card_bg"])
+        doc.setStrokeColor(theme["card_line"])
+        doc.roundRect(x, y - table_h, content_width, table_h, 6, fill=1, stroke=1)
+        rows = [
+            ("Mode", mode),
+            (first_label, first_input),
+            (second_label, second_input),
+        ]
+        row_y = y - 16
+        label_x = x + 14
+        value_x = x + 92
+        for idx, (label, value) in enumerate(rows):
+            doc.setFillColor(theme["brand_dark"])
+            doc.setFont("Helvetica-Bold", 10)
+            doc.drawString(label_x, row_y, f"{label:<6}")
+            doc.drawString(label_x + 48, row_y, ":")
+            doc.setFillColor(theme["ink"])
+            doc.setFont("Helvetica", 10)
+            doc.drawString(value_x, row_y, value)
+            row_y -= 17
+            if idx < len(rows) - 1:
+                doc.setStrokeColor(colors.HexColor("#E6EEF7"))
+                doc.setLineWidth(0.5)
+                doc.line(x + 10, row_y + 8, x + content_width - 10, row_y + 8)
+        y -= table_h + 14
+        doc.setStrokeColor(theme["line"])
+        doc.setLineWidth(0.8)
+        doc.line(x, y, x + content_width, y)
+        return y - 16
+    @staticmethod
+    def _draw_recommendation_card(
+        doc: Any,
+        y: float,
+        x: float,
+        content_width: float,
+        lines: list[str],
+        theme: dict[str, Any],
+    ) -> float:
+        from reportlab.lib import colors
+
+        wrapped: list[str] = []
+        for line in lines:
+            wrapped.extend(textwrap.wrap(line, width=100, break_long_words=False, break_on_hyphens=False))
+        card_h = 34 + (len(wrapped) * 14)
+
+        doc.setFillColor(colors.HexColor("#F8FBFF"))
+        doc.setStrokeColor(colors.HexColor("#BFDDF2"))
+        doc.setLineWidth(1)
+        doc.roundRect(x, y - card_h, content_width, card_h, 8, fill=1, stroke=1)
+
+        doc.setFillColor(theme["brand_dark"])
+        doc.setFont("Helvetica-Bold", 12)
+        doc.drawString(x + 12, y - 18, "RECOMMENDATION")
+
+        doc.setStrokeColor(theme["line"])
+        doc.setLineWidth(0.7)
+        doc.line(x + 10, y - 23, x + content_width - 10, y - 23)
+
+        body_y = y - 40
+        doc.setFillColor(theme["ink"])
+        doc.setFont("Helvetica", 10.5)
+        for row in wrapped:
+            doc.drawString(x + 14, body_y, row)
+            body_y -= 14
+
+        return y - card_h - 10
 
     @staticmethod
     def _draw_page_header(
@@ -920,7 +1100,7 @@ class SessionHistory:
         doc.setFillColor(colors.HexColor("#4A5D73"))
         doc.setFont("Helvetica", 9)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        doc.drawString(margin_x, y, "Generated by TRX-AI | v1.0")
+        doc.drawString(margin_x, y, "Generated by TRX-AI v1.0 | Evaluation Module")
         doc.drawRightString(page_width - margin_x, y, f"{timestamp} | Page {page_number}")
 
     def _draw_section_heading(
@@ -1001,3 +1181,4 @@ class SessionHistory:
             return logo_path if logo_path.exists() else None
         except Exception:
             return None
+

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import io
 import unittest
@@ -50,6 +50,63 @@ def ignored():
         self.assertTrue(sections["fix_suggestions"])
         self.assertEqual(sections["confidence_score"], 88)
 
+    def test_parse_code_review_sections_json(self) -> None:
+        text = """{
+  "code_debug": [{"issue":"Find Max","description":"Missing empty-list check"}],
+  "code_improvements": ["Add guard clause"],
+  "performance": ["Use memoization for fibonacci"],
+  "security": ["Validate file paths"],
+  "fix_suggestions": ["Add try/except for file IO"],
+  "final_summary": "Fix input validation first",
+  "confidence": "88%"
+}"""
+        sections = RealityAnalyzer._parse_code_review_sections(text)
+        self.assertIn("Find Max: Missing empty-list check", sections["code_debug"][0])
+        self.assertEqual(sections["confidence_score"], 88)
+        self.assertTrue(sections["fix_suggestions"])
+
+    def test_extract_fixed_code_from_json_payload(self) -> None:
+        text = """{
+  "fixed_code": [
+    {"issue":"one","code":"def a():\\n    return 1"},
+    {"issue":"two","code":"def b():\\n    return 2"}
+  ]
+}"""
+        fixed = RealityAnalyzer._extract_fixed_code(text)
+        self.assertIn("def a():", fixed)
+        self.assertIn("def b():", fixed)
+
+    def test_review_cache_hit(self) -> None:
+        analyzer = RealityAnalyzer(AppConfig.from_env())
+        call_count = {"n": 0}
+
+        def fake_pipeline(_code: str, _lang: str) -> dict:
+            call_count["n"] += 1
+            return {
+                "ok": True,
+                "text": (
+                    "CODE DEBUG:\n- Line 1 bug\n\n"
+                    "CODE IMPROVEMENTS:\n- Improve naming\n\n"
+                    "PERFORMANCE:\n- Use better loop\n\n"
+                    "SECURITY:\n- Validate input\n\n"
+                    "FIX SUGGESTIONS:\n- Add guard\n\n"
+                    "FIXED CODE:\n```python\ndef x():\n    return 1\n```\n\n"
+                    "FINAL SUMMARY:\n- Fix guard first\n\n"
+                    "CONFIDENCE:\n- 80%\n"
+                ),
+                "critic_score": 0.9,
+                "steps": ["analyzer", "generator", "critic_1"],
+                "truncated": False,
+            }
+
+        with patch.object(analyzer, "_run_code_review_multi_agent_pipeline", side_effect=fake_pipeline):
+            first = analyzer.analyze_code_multi_agent("def x():\n    return 1\n")
+            second = analyzer.analyze_code_multi_agent("def x():\n    return 1\n")
+
+        self.assertEqual(call_count["n"], 1)
+        self.assertIn("cache_hit", second.get("system_status", []))
+        self.assertEqual(first.get("fixed_code"), second.get("fixed_code"))
+
     def test_python_validation(self) -> None:
         self.assertTrue(RealityAnalyzer._is_valid_python_code("def f():\n    return 1\n"))
         self.assertFalse(RealityAnalyzer._is_valid_python_code("def f(:\n    return 1\n"))
@@ -63,7 +120,7 @@ class FormatterTests(unittest.TestCase):
         formatter = OutputFormatter(console)
         analysis = {
             "response_mode": "analysis",
-            "debug_analysis": ["Fibonacci uses O(2ⁿ) recursion"],
+            "debug_analysis": ["Fibonacci uses O(2â¿) recursion"],
             "improvements": ["Use iterative DP"],
             "predictions": ["Runtime will grow rapidly"],
             "final_insight": ["Prioritize complexity fix"],

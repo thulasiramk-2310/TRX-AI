@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import hashlib
 import json
 import sys
@@ -234,6 +235,7 @@ class RealityAnalyzer:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self._response_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._review_response_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._agent_flags: dict[str, bool] = {
             "debug": True,
             "improve": True,
@@ -567,6 +569,15 @@ class RealityAnalyzer:
         if not cleaned_code:
             raise ValueError("Code content is empty.")
         language = self._detect_language(cleaned_code)
+        review_cache_key = self._review_cache_key(cleaned_code, language)
+        cached_review = self._review_cache_get(review_cache_key)
+        if cached_review is not None:
+            cached_copy = copy.deepcopy(cached_review)
+            statuses = cached_copy.get("system_status", [])
+            if isinstance(statuses, list) and "cache_hit" not in statuses:
+                statuses.append("cache_hit")
+                cached_copy["system_status"] = statuses
+            return cached_copy
 
         # Guard against oversized payloads that can degrade model quality.
         code_for_prompt = cleaned_code[:2500] if len(cleaned_code) > 2500 else cleaned_code
@@ -581,7 +592,7 @@ class RealityAnalyzer:
             heuristic_fixed = self._rule_based_fixed_code(cleaned_code)
             confidence_score = int(fallback_sections.get("confidence_score", 65))
             self._record_failure(cleaned_code, "", "llm_unavailable")
-            return {
+            result = {
                 "response_mode": "analysis",
                 "analysis_text": self._compose_code_review_text(fallback_sections),
                 "system_status": ["intent=review", "source=rule-fallback", "llm_unavailable", "fixed_code_heuristic"],
@@ -596,6 +607,8 @@ class RealityAnalyzer:
                 "intent": "review",
                 "intent_source": "rule",
             }
+            self._review_cache_set(review_cache_key, result)
+            return result
 
         response_text = str(pipeline.get("text", ""))
         print("[RAW LLM OUTPUT]")
@@ -641,7 +654,7 @@ class RealityAnalyzer:
         status.append(f"critic_score={pipeline.get('critic_score', 0.0):.2f}")
         status.append(f"steps={len(pipeline.get('steps', []))}")
 
-        return {
+        result = {
             "response_mode": "analysis",
             "analysis_text": analysis_text,
             "system_status": status,
@@ -656,6 +669,8 @@ class RealityAnalyzer:
             "intent": "review",
             "intent_source": "llm",
         }
+        self._review_cache_set(review_cache_key, result)
+        return result
 
     def _run_code_review_multi_agent_pipeline(self, code_for_prompt: str, language: str) -> dict[str, Any]:
         steps: list[str] = []
@@ -1018,6 +1033,10 @@ IMPORTANT:
 
     @staticmethod
     def _parse_code_review_sections(text: str) -> dict[str, Any]:
+        json_sections = RealityAnalyzer._try_parse_review_json(text)
+        if json_sections is not None:
+            return json_sections
+
         header_aliases = {
             "CODE DEBUG": "code_debug",
             "DEBUG ANALYSIS": "code_debug",
@@ -1098,6 +1117,92 @@ IMPORTANT:
             "security": sections["security"],
             "fix_suggestions": sections["fix_suggestions"],
             "final_summary": sections["final_summary"],
+            "confidence_score": confidence_score,
+        }
+
+    @staticmethod
+    def _try_parse_review_json(text: str) -> dict[str, Any] | None:
+        payload: dict[str, Any] | None = None
+        raw = text.strip()
+        candidates: list[str] = [raw]
+        fenced = re.search(r"```json\s*([\s\S]*?)```", text, flags=re.IGNORECASE)
+        if fenced:
+            candidates.insert(0, fenced.group(1).strip())
+        brace_match = re.search(r"\{[\s\S]*\}", text)
+        if brace_match:
+            candidates.append(brace_match.group(0))
+
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                parsed = json.loads(candidate)
+            except ValueError:
+                continue
+            if isinstance(parsed, dict):
+                payload = parsed
+                break
+
+        if payload is None:
+            return None
+
+        def _normalize_items(value: Any) -> list[str]:
+            out: list[str] = []
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        # Support {"issue": "...", "description": "..."} and similar.
+                        desc = str(item.get("description", "")).strip()
+                        issue = str(item.get("issue", "")).strip()
+                        code = str(item.get("code", "")).strip()
+                        if desc and issue:
+                            out.append(f"{issue}: {desc}")
+                        elif desc:
+                            out.append(desc)
+                        elif code:
+                            out.append(code)
+                        elif issue:
+                            out.append(issue)
+                    else:
+                        text_item = str(item).strip()
+                        if text_item:
+                            out.append(text_item)
+            elif isinstance(value, dict):
+                for key, val in value.items():
+                    line = f"{str(key).strip()}: {str(val).strip()}".strip(": ").strip()
+                    if line:
+                        out.append(line)
+            elif isinstance(value, str):
+                for row in value.splitlines():
+                    row = row.strip()
+                    if row:
+                        out.append(row)
+            return out
+
+        confidence_score = 70
+        confidence_candidates = _normalize_items(payload.get("confidence", []))
+        if not confidence_candidates and "score" in payload:
+            confidence_candidates = _normalize_items(payload.get("score"))
+        for item in confidence_candidates:
+            match = re.search(r"(\d{1,3})\s*%?", item)
+            if match:
+                confidence_score = max(0, min(100, int(match.group(1))))
+                break
+
+        code_debug = _normalize_items(payload.get("code_debug", [])) or ["No critical bugs were explicitly identified."]
+        code_improvements = _normalize_items(payload.get("code_improvements", [])) or ["Apply incremental refactoring for readability and maintainability."]
+        performance = _normalize_items(payload.get("performance", [])) or ["LLM output parsing incomplete - check raw output"]
+        security = _normalize_items(payload.get("security", [])) or ["No immediate security issue was explicitly identified."]
+        fix_suggestions = _normalize_items(payload.get("fix_suggestions", []))
+        final_summary = _normalize_items(payload.get("final_summary", [])) or ["Prioritize correctness issues first, then refactor and optimize."]
+
+        return {
+            "code_debug": code_debug,
+            "code_improvements": code_improvements,
+            "performance": performance,
+            "security": security,
+            "fix_suggestions": fix_suggestions,
+            "final_summary": final_summary,
             "confidence_score": confidence_score,
         }
 
@@ -1195,6 +1300,33 @@ IMPORTANT:
 
     @staticmethod
     def _extract_fixed_code(response_text: str) -> str:
+        json_payload = RealityAnalyzer._try_parse_review_json(response_text)
+        if json_payload is not None:
+            # Best effort JSON extraction for fixed code.
+            # Parse from raw JSON to preserve full multiline code snippets.
+            match = re.search(r"\{[\s\S]*\}", response_text)
+            raw_json = match.group(0) if match else response_text.strip()
+            try:
+                parsed = json.loads(raw_json)
+                fixed_value = parsed.get("fixed_code")
+                if isinstance(fixed_value, str) and fixed_value.strip():
+                    return fixed_value.strip()
+                if isinstance(fixed_value, list):
+                    chunks: list[str] = []
+                    for item in fixed_value:
+                        if isinstance(item, dict):
+                            code = str(item.get("code", "")).strip()
+                            if code:
+                                chunks.append(code)
+                        else:
+                            text_item = str(item).strip()
+                            if text_item:
+                                chunks.append(text_item)
+                    if chunks:
+                        return "\n\n".join(chunks).strip()
+            except ValueError:
+                pass
+
         fenced = re.search(
             r"FIXED CODE:\s*```(?:python)?\s*([\s\S]*?)```",
             response_text,
@@ -1366,3 +1498,21 @@ IMPORTANT:
         self._response_cache[key] = value
         while len(self._response_cache) > self.config.cache_size:
             self._response_cache.popitem(last=False)
+
+    def _review_cache_key(self, code: str, language: str) -> str:
+        raw = f"{language}|{self.config.local_llm_model}|{code.strip()}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _review_cache_get(self, key: str) -> dict[str, Any] | None:
+        if key not in self._review_response_cache:
+            return None
+        value = self._review_response_cache.pop(key)
+        self._review_response_cache[key] = value
+        return value
+
+    def _review_cache_set(self, key: str, value: dict[str, Any]) -> None:
+        if key in self._review_response_cache:
+            self._review_response_cache.pop(key)
+        self._review_response_cache[key] = copy.deepcopy(value)
+        while len(self._review_response_cache) > max(20, self.config.cache_size // 2):
+            self._review_response_cache.popitem(last=False)
