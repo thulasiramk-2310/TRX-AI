@@ -94,6 +94,14 @@ System metadata is also shown (`intent`, `source`, and status tags).
 - Truncation handling for long model outputs
 - Fallback analysis when model is unavailable
 - Safe fix flow with preview + confirmation
+- Semantic scoring for evaluation quality checks (`semantic_scoring.py`)
+
+## Recent Improvements
+
+- Upgraded benchmark scoring from basic keyword/fuzzy matching to weighted semantic scoring.
+- Refactored review orchestration in `analyzer.py` into smaller maintainable helper flows.
+- Reduced PDF export duplication in `history.py` with shared setup/theme helpers.
+- Expanded automated test coverage to 13 unit/smoke tests.
 
 ## Evaluation
 
@@ -167,6 +175,7 @@ chatcli/
 |-- history.py
 |-- config.py
 |-- evaluation.py
+|-- semantic_scoring.py
 |-- tests/
 |-- docs/
 |-- assets/
