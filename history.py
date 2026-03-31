@@ -159,6 +159,10 @@ class SessionHistory:
         confidence = parsed_sections.get("CONFIDENCE SCORE", ["N/A"])
         summary_lines = self._build_summary_lines(mode, parsed_sections, confidence)
 
+        fixed_code_lines = parsed_sections.get("LLM FIXED CODE", [])
+        if fixed_code_lines:
+            fixed_code_lines = self._trim_code_block_lines(fixed_code_lines, max_lines=120)
+
         cards = [
             ("SUMMARY", summary_lines),
             ("INPUT", [user_input]),
@@ -167,8 +171,14 @@ class SessionHistory:
             ("IMPROVEMENTS", parsed_sections.get("IMPROVEMENTS", parsed_sections.get("FIX SUGGESTIONS", ["N/A"]))),
             ("PREDICTIONS", parsed_sections.get("PREDICTIONS", ["N/A"])),
             ("FINAL INSIGHT", parsed_sections.get("FINAL INSIGHT", ["N/A"])),
+            ("CHANGES APPLIED", parsed_sections.get("CHANGES APPLIED", [])),
+            ("CODE COMPLEXITY", parsed_sections.get("CODE COMPLEXITY", [])),
+            ("OPTIMIZATION APPROACHES", parsed_sections.get("OPTIMIZATION APPROACHES", [])),
+            ("LLM FIXED CODE", fixed_code_lines),
             ("CONFIDENCE SCORE", confidence),
         ]
+
+        cards = [(title, lines) for title, lines in cards if lines]
 
         for title, lines in cards:
             required = self._estimate_card_height(lines)
@@ -348,6 +358,31 @@ class SessionHistory:
         y -= card_h + 12
 
         recommendation = self._comparison_recommendation(metrics_first, metrics_second, first_label, second_label)
+        issue_diff = self._build_issue_diff(parsed_first, parsed_second)
+        issue_card_height = self._estimate_issue_diff_card_height(issue_diff)
+        if y - issue_card_height < 2.8 * cm:
+            self._draw_footer(doc, width, margin_x, 1)
+            doc.showPage()
+            y = self._draw_page_header(
+                doc,
+                width,
+                height,
+                margin_x,
+                logo_path,
+                theme,
+                subtitle="Reality Debugger",
+                tagline="Debugging Real Life Like Code",
+            )
+        y = self._draw_issue_diff_card(
+            doc,
+            y=y,
+            x=margin_x,
+            content_width=content_width,
+            issue_diff=issue_diff,
+            first_label=first_label,
+            second_label=second_label,
+            theme=theme,
+        )
         y = self._draw_card_section(
             doc,
             "RECOMMENDATION",
@@ -368,19 +403,25 @@ class SessionHistory:
         current: str | None = None
 
         for raw_line in structured_output.splitlines():
-            line = raw_line.strip()
-            if not line:
+            stripped = raw_line.strip()
+            if not stripped:
                 continue
-            if line.startswith("[") and line.endswith("]"):
-                current = line[1:-1].strip().upper()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                current = stripped[1:-1].strip().upper()
                 sections.setdefault(current, [])
                 continue
             if current is None:
                 continue
-            if line.startswith("- "):
-                sections[current].append(line[2:].strip())
+
+            # Preserve indentation exactly for code blocks in reports.
+            if current == "LLM FIXED CODE":
+                sections[current].append(raw_line.rstrip("\n"))
+                continue
+
+            if stripped.startswith("- "):
+                sections[current].append(stripped[2:].strip())
             else:
-                sections[current].append(line)
+                sections[current].append(stripped)
 
         return sections
 
@@ -388,6 +429,20 @@ class SessionHistory:
     def _wrap_lines(text: str, max_chars: int) -> list[str]:
         wrapped = textwrap.wrap(text, width=max_chars, break_long_words=False, break_on_hyphens=False)
         return wrapped if wrapped else [""]
+
+    @staticmethod
+    def _trim_code_block_lines(lines: list[str], max_lines: int = 120) -> list[str]:
+        cleaned: list[str] = []
+        for line in lines:
+            value = line.rstrip()
+            if value.strip() == "```":
+                continue
+            cleaned.append(value)
+        if len(cleaned) <= max_lines:
+            return cleaned
+        trimmed = cleaned[:max_lines]
+        trimmed.append("... [truncated for PDF readability]")
+        return trimmed
 
     @staticmethod
     def _estimate_card_height(lines: list[str]) -> float:
@@ -455,6 +510,125 @@ class SessionHistory:
             lines.append("Bug count unchanged; improve specificity in input details for sharper diagnosis.")
 
         return lines
+
+    @staticmethod
+    def _extract_issue_map(parsed_sections: dict[str, list[str]]) -> dict[str, str]:
+        """Extracts normalized issue candidates from key structured sections."""
+        source_sections = (
+            "DEBUG ANALYSIS",
+            "BUGS DETECTED",
+            "IMPROVEMENTS",
+            "FIX SUGGESTIONS",
+            "PREDICTIONS",
+            "SECURITY",
+            "FINAL INSIGHT",
+        )
+        issue_map: dict[str, str] = {}
+        for section_name in source_sections:
+            for raw in parsed_sections.get(section_name, []):
+                text = str(raw).strip()
+                if not text:
+                    continue
+                normalized = re.sub(r"[^a-z0-9\s]+", " ", text.lower())
+                normalized = re.sub(r"\s+", " ", normalized).strip()
+                if len(normalized) < 6:
+                    continue
+                issue_map.setdefault(normalized, text)
+        return issue_map
+
+    def _build_issue_diff(
+        self,
+        first_sections: dict[str, list[str]],
+        second_sections: dict[str, list[str]],
+    ) -> dict[str, list[str]]:
+        first_map = self._extract_issue_map(first_sections)
+        second_map = self._extract_issue_map(second_sections)
+
+        first_keys = set(first_map.keys())
+        second_keys = set(second_map.keys())
+
+        resolved = sorted(first_keys - second_keys)
+        remaining = sorted(first_keys & second_keys)
+        new_findings = sorted(second_keys - first_keys)
+
+        return {
+            "resolved": [first_map[key] for key in resolved],
+            "remaining": [second_map.get(key, first_map[key]) for key in remaining],
+            "new": [second_map[key] for key in new_findings],
+        }
+
+    def _estimate_issue_diff_card_height(self, issue_diff: dict[str, list[str]]) -> float:
+        max_chars = 94
+        rows = 8
+        for key in ("resolved", "remaining", "new"):
+            entries = issue_diff.get(key, [])[:10]
+            rows += 2
+            for entry in entries:
+                rows += max(1, (len(entry) // max_chars) + 1)
+            if not entries:
+                rows += 1
+        return 28 + (rows * 12)
+
+    def _draw_issue_diff_card(
+        self,
+        doc: Any,
+        *,
+        y: float,
+        x: float,
+        content_width: float,
+        issue_diff: dict[str, list[str]],
+        first_label: str,
+        second_label: str,
+        theme: dict[str, Any],
+    ) -> float:
+        from reportlab.lib import colors
+
+        card_h = self._estimate_issue_diff_card_height(issue_diff)
+        doc.setFillColor(theme["card_bg"])
+        doc.setStrokeColor(theme["card_line"])
+        doc.setLineWidth(1)
+        doc.roundRect(x, y - card_h, content_width, card_h, 8, fill=1, stroke=1)
+
+        doc.setFillColor(theme["brand_dark"])
+        doc.setFont("Helvetica-Bold", 11)
+        doc.drawString(x + 12, y - 18, "ISSUE DIFFERENCE (SIDE-BY-SIDE)")
+
+        doc.setStrokeColor(theme["line"])
+        doc.setLineWidth(0.7)
+        doc.line(x + 10, y - 23, x + content_width - 10, y - 23)
+
+        doc.setFillColor(theme["muted"])
+        doc.setFont("Helvetica", 9)
+        doc.drawString(x + 12, y - 35, f"Compared: {first_label} -> {second_label}")
+
+        cursor_y = y - 50
+        categories = [
+            ("RESOLVED ISSUES", issue_diff.get("resolved", [])[:10], colors.HexColor("#1FAF5A")),
+            ("REMAINING ISSUES", issue_diff.get("remaining", [])[:10], colors.HexColor("#D64545")),
+            ("NEW FINDINGS", issue_diff.get("new", [])[:10], colors.HexColor("#D08B00")),
+        ]
+
+        for title, lines, color in categories:
+            doc.setFillColor(color)
+            doc.setFont("Helvetica-Bold", 10)
+            doc.drawString(x + 12, cursor_y, title)
+            cursor_y -= 13
+
+            doc.setFillColor(theme["ink"])
+            doc.setFont("Helvetica", 9)
+            if not lines:
+                doc.drawString(x + 18, cursor_y, "- none")
+                cursor_y -= 12
+            else:
+                for line in lines:
+                    wrapped = self._wrap_lines(line, max_chars=94)
+                    for idx, part in enumerate(wrapped):
+                        prefix = "- " if idx == 0 else "  "
+                        doc.drawString(x + 18, cursor_y, f"{prefix}{part}")
+                        cursor_y -= 12
+            cursor_y -= 4
+
+        return y - card_h - 10
 
     @staticmethod
     def _draw_manual_comparison_chart(
@@ -582,6 +756,17 @@ class SessionHistory:
         content_width: float,
         theme: dict[str, Any],
     ) -> float:
+        if title.upper() == "LLM FIXED CODE":
+            return self._draw_code_card_section(
+                doc,
+                title,
+                lines,
+                y,
+                x,
+                content_width,
+                theme,
+            )
+
         max_chars = 98
         wrapped: list[str] = []
         for entry in lines:
@@ -610,6 +795,67 @@ class SessionHistory:
         for idx, text_line in enumerate(wrapped):
             prefix = "-> " if idx == 0 else "  "
             doc.drawString(x + 14, body_y, f"{prefix}{text_line}")
+            body_y -= line_height
+
+        return y - card_h - 10
+
+    def _draw_code_card_section(
+        self,
+        doc: Any,
+        title: str,
+        lines: list[str],
+        y: float,
+        x: float,
+        content_width: float,
+        theme: dict[str, Any],
+    ) -> float:
+        from reportlab.lib import colors
+
+        max_chars = 100
+        wrapped: list[str] = []
+        for raw in lines:
+            line = raw.expandtabs(4).rstrip("\n")
+            if line.strip() == "```":
+                continue
+            parts = textwrap.wrap(
+                line,
+                width=max_chars,
+                break_long_words=False,
+                break_on_hyphens=False,
+                replace_whitespace=False,
+                drop_whitespace=False,
+            )
+            wrapped.extend(parts if parts else [""])
+
+        line_height = 12
+        card_h = 30 + (len(wrapped) * line_height) + 14
+
+        doc.setFillColor(theme["card_bg"])
+        doc.setStrokeColor(theme["card_line"])
+        doc.setLineWidth(1)
+        doc.roundRect(x, y - card_h, content_width, card_h, 8, fill=1, stroke=1)
+
+        doc.setFillColor(theme["brand_dark"])
+        doc.setFont("Helvetica-Bold", 11)
+        doc.drawString(x + 12, y - 18, title)
+
+        doc.setStrokeColor(theme["line"])
+        doc.setLineWidth(0.7)
+        doc.line(x + 10, y - 23, x + content_width - 10, y - 23)
+
+        code_x = x + 12
+        code_top = y - 30
+        code_w = content_width - 24
+        code_h = card_h - 42
+        doc.setFillColor(colors.HexColor("#F2F6FA"))
+        doc.roundRect(code_x, code_top - code_h, code_w, code_h, 4, fill=1, stroke=0)
+
+        body_y = code_top - 14
+        doc.setFillColor(colors.HexColor("#0E2238"))
+        doc.setFont("Courier", 9)
+
+        for text_line in wrapped:
+            doc.drawString(code_x + 8, body_y, text_line)
             body_y -= line_height
 
         return y - card_h - 10
