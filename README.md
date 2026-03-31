@@ -1,170 +1,141 @@
-# TRX-AI - Multi-Agent Code Intelligence System
+﻿# TRX-AI
 
-TRX-AI is a production-style, CLI-based AI system for structured reasoning, code review, and automated fixing workflows.  
-It combines hybrid intent detection, multi-agent analysis, and local LLM inference to deliver clear, actionable outputs in terminal-first environments.
+> Built with reliability, explainability, and structured reasoning at its core.
+>
+> **"A resilient multi-agent AI system for structured debugging and code intelligence."**
 
-## Overview
+![CI](https://img.shields.io/github/actions/workflow/status/thulasiramk-2310/TRX-AI/ci.yml?branch=main&label=CI)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![License](https://img.shields.io/github/license/thulasiramk-2310/TRX-AI)
 
-TRX-AI is designed for fast engineering feedback loops:
-
-- CLI-driven interaction for local development workflows
-- Hybrid intent detection (rule-based priority + LLM fallback)
-- Multi-agent reasoning pipeline (Debug, Improve, Predict, Code Review)
-- Structured code review with categorized outputs
-- Automatic fixed-code generation (`fix <file.py>`)
-- Local LLM support via Ollama (`qwen3:8b` default)
+TRX-AI is a CLI-first, local-LLM powered code intelligence system that combines hybrid intent detection and multi-agent reasoning to produce structured, actionable outputs for debugging and code review.
 
 ## Features
 
-- Structured debugging output:
-  - `DEBUG`
-  - `IMPROVEMENTS`
-  - `PERFORMANCE`
-  - `FIX`
-  - `SUMMARY`
-  - `CONFIDENCE`
-- Code review engine for file/folder targets
-- Auto-fix generation with safe write to `<name>_fixed.py`
-- Real-time file watcher (`watch <folder>`) with debounce support
-- Report export:
-  - TXT reports
-  - PDF reports
-  - comparison PDF reports
-- Evaluation and benchmarking module (`evaluation.py`)
-- Baseline vs TRX comparison metrics
-
-## Architecture
-
-Pipeline:
-
-`User Input -> Intent Detection -> Multi-Agent System -> LLM -> Structured Output`
-
-```mermaid
-flowchart LR
-    A[User Input] --> B[Hybrid Intent Detection]
-    B --> C[Command Router]
-    C --> D[Multi-Agent Orchestrator]
-    D --> E[Debug Agent]
-    D --> F[Improve Agent]
-    D --> G[Predict Agent]
-    D --> H[Code Review Agent]
-    E --> I[Local LLM - Ollama]
-    F --> I
-    G --> I
-    H --> I
-    I --> J[Structured Output Formatter]
-    J --> K[CLI Panel Output]
-    J --> L[Export TXT/PDF]
-    J --> M[Session History]
-```
+- Hybrid intent detection (rule + LLM)
+- Multi-agent reasoning (Debug, Improve, Predict)
+- Code review + auto-fix
+- Local LLM (Ollama)
+- Structured CLI UI
+- Evaluation + benchmarking
+- Fallback reliability system
 
 ## Demo
 
 ```bash
 trx-ai > review dsa_test.py
-trx-ai > fix formatter.py
+trx-ai > fix dsa_test.py
 python evaluation.py
 ```
 
-## Visuals
+## Architecture
 
-### Architecture Graph
-![TRX-AI Architecture](assets/architecture.png)
+Pipeline:
 
-### CLI Screenshot - Review Output
-![TRX-AI Review](assets/screenshots/review-output.png)
+`User -> Intent -> Agents -> LLM -> Structured Output`
 
-### CLI Screenshot - Fix Output
-![TRX-AI Fix](assets/screenshots/fix-output.png)
+- User input enters the CLI
+- Hybrid intent detection classifies the request
+- Specialized agents generate focused reasoning
+- Local LLM synthesizes deep analysis
+- Formatter renders structured output sections
 
-Note: If screenshots are not present yet, add them under `assets/screenshots/`.
+For detailed architecture notes, see [docs/architecture.md](docs/architecture.md).
 
-## Commands
+## Evaluation
 
-- `help` - Show available commands
-- `history` - Show session inputs
-- `save [path]` - Save session JSON
-- `export <file>` - Export latest analysis report
-- `export compare [file]` - Export comparison report from latest two analyses
-- `agents all | agents debug improve predict` - Enable/disable agents
-- `mode debug|optimize|predict` - Set fallback profile
-- `review <file.py | folder_path>` - Run code review
-- `fix <file.py>` - Generate fixed file and optionally save
-- `watch <folder>` - Auto-review `.py` file changes
-- `exit` - Quit CLI
+TRX-AI includes a benchmark dataset and evaluation engine in `evaluation.py`.
 
-## Evaluation and Benchmarking
+Metrics:
 
-TRX-AI includes a complete evaluation module in `evaluation.py`.
+- Accuracy
+- Fix Quality
+- Avg Response Time
+- Completeness
 
-It measures:
+Graph:
 
-- `accuracy_score` - Expected issue match rate
-- `fix_quality_score` - Expected fix suggestion match rate
-- `avg_response_time_seconds` - Average response latency
-- `completeness_score` - Section fill quality (`debug/improve/performance`)
-- Baseline comparison vs simple LLM prompt
+![Accuracy Graph](./assets/trx_ai_accuracy_graph.png)
 
-Run:
+Screenshot:
 
-```bash
-python evaluation.py
-```
+![Evaluation Output](./assets/evaluation_output.png)
 
-Output:
+Detailed methodology is documented in [docs/evaluation.md](docs/evaluation.md).
 
-- terminal benchmark summary
-- `evaluation_report.txt`
+## Reliability
 
-## Setup
+TRX-AI is built to remain useful under imperfect model conditions.
 
-1. Create virtual environment and install dependencies:
+- Retry logic with backoff for local LLM calls
+- AST validation for generated fixed code
+- Auto-repair and continuation when output is truncated
+- Deterministic fallback analysis when LLM is unavailable
+- Heuristic fallback fixed-code generation for continuity
+
+## Installation
 
 ```bash
 pip install -r requirements.txt
 ```
 
-2. Configure `.env`:
-
-```env
-RD_USE_LOCAL_LLM=true
-LOCAL_LLM_URL=http://localhost:11434/api/generate
-LOCAL_LLM_MODEL=qwen3:8b
-HF_REQUEST_TIMEOUT=120
-HF_MAX_NEW_TOKENS=600
-HF_TEMPERATURE=0.3
-```
-
-3. Start TRX-AI:
+## Quickstart
 
 ```bash
 python main.py
 ```
 
+## Usage
+
+```bash
+trx-ai > help
+trx-ai > review <file.py | folder_path>
+trx-ai > fix <file.py>
+trx-ai > watch <folder>
+trx-ai > export quick_report.txt
+```
+
 ## Project Structure
 
 ```text
-chatcli/
-|-- main.py
-|-- analyzer.py
-|-- formatter.py
-|-- watcher.py
-|-- history.py
-|-- config.py
-|-- evaluation.py
-|-- dsa_test.py
-|-- README.md
+trx-ai/
+├── analyzer.py
+├── formatter.py
+├── evaluation.py
+├── main.py
+├── tests/
+│   └── test_trx_ai.py
+├── docs/
+│   ├── architecture.md
+│   ├── evaluation.md
+│   └── design.md
+├── assets/
+│   ├── trx_ai_accuracy_graph.png
+│   └── evaluation_output.png
+├── README.md
+├── CONTRIBUTING.md
+├── requirements.txt
+├── LICENSE
+└── .github/
+    ├── workflows/
+    │   └── ci.yml
+    └── ISSUE_TEMPLATE/
+        ├── bug_report.md
+        └── feature_request.md
 ```
 
-## Why TRX-AI
+## Roadmap
 
-TRX-AI is built to feel like a lightweight, local-first coding intelligence assistant:
+- Stronger section-level semantic scoring
+- Expanded deterministic patch templates
+- More evaluation cases across security/performance domains
+- Better visualization and dashboard export
+- Plugin-ready architecture for custom agents
 
-- deterministic where needed (rules)
-- adaptive where needed (LLM)
-- structured for readability
-- practical for real development workflows
+## Contributing
+
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening pull requests.
 
 ## License
 
-MIT (add `LICENSE` file if not present).
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
