@@ -1,0 +1,32 @@
+﻿# Environment files
+.env
+.env.*
+!.env.example
+
+# Generated reports
+reports/
+
+# Session/runtime outputs
+sessions/
+*.log
+
+# Python cache/build
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+venv/
+.venv/
+
+# Editor/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Generated fixed files (optional)
+*_fixed.py
