@@ -1,24 +1,49 @@
-﻿# TRX-AI
+# TRX-AI - Multi-Agent Code Intelligence System
 
-> Built with reliability, explainability, and structured reasoning at its core.
->
-> **"A resilient multi-agent AI system for structured debugging and code intelligence."**
+TRX-AI is a CLI-first AI assistant for structured debugging, code review, and auto-fix workflows using a local LLM.
 
-![CI](https://img.shields.io/github/actions/workflow/status/thulasiramk-2310/TRX-AI/ci.yml?branch=main&label=CI)
-![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![License](https://img.shields.io/github/license/thulasiramk-2310/TRX-AI)
+## Overview
 
-TRX-AI is a CLI-first, local-LLM powered code intelligence system that combines hybrid intent detection and multi-agent reasoning to produce structured, actionable outputs for debugging and code review.
+TRX-AI is designed for practical engineering loops in terminal environments:
 
-## Features
+- Hybrid intent detection (rule priority + LLM fallback)
+- Multi-agent reasoning (Debug, Improve, Predict, Review)
+- Structured review output (`DEBUG`, `IMPROVEMENTS`, `PERFORMANCE`, `FIX`, `SUMMARY`, `CONFIDENCE`)
+- Auto-fix generation to safe output files (`<name>_fixed.py`)
+- Session history and TXT/PDF export
 
-- Hybrid intent detection (rule + LLM)
-- Multi-agent reasoning (Debug, Improve, Predict)
-- Code review + auto-fix
-- Local LLM (Ollama)
-- Structured CLI UI
-- Evaluation + benchmarking
-- Fallback reliability system
+## Architecture
+
+Pipeline:
+
+`User Input -> Intent Detection -> Agent Orchestrator -> Local LLM -> Structured Output -> CLI/Reports`
+
+```mermaid
+flowchart LR
+    A[User Input] --> B[Hybrid Intent Detection]
+    B --> C{Route}
+    C -->|chat| D[Conversation Handler]
+    C -->|review/fix/watch| E[Code Review Pipeline]
+    E --> F[Analyzer Agent]
+    E --> G[Generator Agent]
+    E --> H[Critic Agent]
+    E --> I[Fixer Agent]
+    D --> J[Local LLM]
+    F --> J
+    G --> J
+    H --> J
+    I --> J
+    J --> K[Structured Formatter]
+    K --> L[CLI Output]
+    K --> M[TXT/PDF Export]
+    K --> N[Session History]
+```
+
+Detailed docs:
+
+- [docs/architecture.md](docs/architecture.md)
+- [docs/design.md](docs/design.md)
+- [docs/evaluation.md](docs/evaluation.md)
 
 ## Demo
 
@@ -28,105 +53,126 @@ trx-ai > fix dsa_test.py
 python evaluation.py
 ```
 
-## Architecture
+## Commands
 
-Pipeline:
+- `help` - Show available commands
+- `history` - Show session inputs
+- `save <path>` - Save session JSON
+- `export <file>` - Export latest analysis report (`.txt` or `.pdf`)
+- `export compare <file>` - Export comparison PDF from latest two analyses
+- `agents all | agents debug improve predict` - Control active agents
+- `mode debug|optimize|predict` - Set fallback profile
+- `review <file.py | folder_path>` - Run multi-agent code review
+- `fix <file.py>` - Generate fixed code and ask before saving
+- `watch <folder>` - Auto-review changed code files
+- `exit | quit` - Close CLI
 
-`User -> Intent -> Agents -> LLM -> Structured Output`
+## Output Format
 
-- User input enters the CLI
-- Hybrid intent detection classifies the request
-- Specialized agents generate focused reasoning
-- Local LLM synthesizes deep analysis
-- Formatter renders structured output sections
+TRX-AI returns structured sections for analysis responses:
 
-For detailed architecture notes, see [docs/architecture.md](docs/architecture.md).
+- `DEBUG`
+- `IMPROVEMENTS`
+- `PERFORMANCE`
+- `FIX`
+- `SUMMARY`
+- `CONFIDENCE`
+
+System metadata is also shown (`intent`, `source`, and status tags).
+
+## Multi-Agent Roles
+
+- Analyzer Agent: identifies core bugs and edge cases
+- Generator Agent: proposes code-level improvements
+- Critic Agent: validates quality and catches weak outputs
+- Fixer Agent: produces final corrected code (safe write to `_fixed` file)
+
+## Reliability
+
+- Rule-first intent routing with LLM fallback
+- Retry/backoff for local LLM calls
+- Truncation handling for long model outputs
+- Fallback analysis when model is unavailable
+- Safe fix flow with preview + confirmation
 
 ## Evaluation
 
-TRX-AI includes a benchmark dataset and evaluation engine in `evaluation.py`.
-
-Metrics:
+Evaluation is available in `evaluation.py` with benchmark-style metrics:
 
 - Accuracy
 - Fix Quality
 - Avg Response Time
 - Completeness
+- Baseline comparison
 
-Graph:
+Run:
 
-![Accuracy Graph](./assets/trx_ai_accuracy_graph.png)
+```bash
+python evaluation.py
+```
 
-Screenshot:
+## Setup
 
-![Evaluation Output](./assets/evaluation_output.png)
-
-Detailed methodology is documented in [docs/evaluation.md](docs/evaluation.md).
-
-## Reliability
-
-TRX-AI is built to remain useful under imperfect model conditions.
-
-- Retry logic with backoff for local LLM calls
-- AST validation for generated fixed code
-- Auto-repair and continuation when output is truncated
-- Deterministic fallback analysis when LLM is unavailable
-- Heuristic fallback fixed-code generation for continuity
-
-## Installation
+1. Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Quickstart
+2. Configure `.env`:
+
+```env
+RD_USE_LOCAL_LLM=true
+LOCAL_LLM_URL=http://localhost:11434/api/generate
+LOCAL_LLM_MODEL=qwen3:8b
+HF_REQUEST_TIMEOUT=120
+HF_MAX_NEW_TOKENS=600
+HF_TEMPERATURE=0.3
+```
+
+3. Start:
 
 ```bash
 python main.py
 ```
 
-## Usage
+## Quick Workflows
 
 ```bash
-trx-ai > help
-trx-ai > review <file.py | folder_path>
-trx-ai > fix <file.py>
-trx-ai > watch <folder>
-trx-ai > export quick_report.txt
+# Chat
+trx-ai > hi
+
+# Review a single file
+trx-ai > review main.py
+
+# Generate fixed code with preview
+trx-ai > fix dsa_test.py
+
+# Export latest run
+trx-ai > export report.pdf
+
+# Compare latest two analyses
+trx-ai > export compare comparison_report.pdf
 ```
 
 ## Project Structure
 
 ```text
-trx-ai/
-├── analyzer.py
-├── formatter.py
-├── evaluation.py
-├── main.py
-├── tests/
-│   └── test_trx_ai.py
-├── docs/
-│   ├── architecture.md
-│   ├── evaluation.md
-│   └── design.md
-├── assets/
-│   ├── trx_ai_accuracy_graph.png
-│   └── evaluation_output.png
-├── README.md
-├── CONTRIBUTING.md
-├── requirements.txt
-├── LICENSE
-
+chatcli/
+|-- main.py
+|-- analyzer.py
+|-- formatter.py
+|-- watcher.py
+|-- history.py
+|-- config.py
+|-- evaluation.py
+|-- tests/
+|-- docs/
+|-- assets/
+|-- README.md
+|-- LICENSE
 ```
-
-## Roadmap
-
-- Stronger section-level semantic scoring
-- Expanded deterministic patch templates
-- More evaluation cases across security/performance domains
-- Better visualization and dashboard export
-- Plugin-ready architecture for custom agents
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).
