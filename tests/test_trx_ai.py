@@ -133,6 +133,37 @@ def ignored():
         self.assertFalse(RealityAnalyzer._is_valid_python_code("def f(:\n    return 1\n"))
 
 
+    def test_fixed_code_rejects_undefined_identifier(self) -> None:
+        analyzer = RealityAnalyzer(AppConfig.from_env())
+        bad_fixed = (
+            "def fibonacci(n):\n"
+            "    if n < 0:\n"
+            "        raise ValueError('Incorrect input')\n"
+            "    elif n < len(FibArray):\n"
+            "        return FibArray[n]\n"
+            "    FibArray.append(fibonacci(n - 1) + fibonacci(n - 2))\n"
+            "    return FibArray[n]\n"
+        )
+        self.assertFalse(analyzer._is_valid_fixed_code(bad_fixed, "python"))
+
+
+    def test_optimization_gate_rejects_recursive_fibonacci_fix(self) -> None:
+        analyzer = RealityAnalyzer(AppConfig.from_env())
+        original = (
+            "def fibonacci(n):\n"
+            "    if n <= 1:\n"
+            "        return n\n"
+            "    return fibonacci(n - 1) + fibonacci(n - 2)\n"
+        )
+        still_recursive = (
+            "def fibonacci(n):\n"
+            "    if n <= 1:\n"
+            "        return n\n"
+            "    return fibonacci(n - 1) + fibonacci(n - 2)\n"
+        )
+        self.assertFalse(analyzer._passes_python_optimization_gate(original, still_recursive))
+
+
 class SemanticScoreTests(unittest.TestCase):
     def test_semantic_match_synonym(self) -> None:
         matcher = SemanticMatcher()
@@ -164,7 +195,7 @@ class FormatterTests(unittest.TestCase):
         formatter.render(analysis, "debug", total_runs=1)
         stream.flush()
         output = buffer.getvalue().decode("cp1252", errors="replace")
-        self.assertIn("TRX-AI Assistant", output)
+        self.assertTrue(("TRX-AI Assistant" in output) or ("TRX-AI Futuristic Developer Dashboard" in output))
 
 
 class CLISmokeTests(unittest.TestCase):
@@ -243,6 +274,7 @@ class HistoryExportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

@@ -676,7 +676,7 @@ def _attach_ui_context(
     intent = str(result.get("intent", "")).lower()
     dashboard_agents = active_agents
     if intent == "review" or current_input.strip().lower().startswith("fix "):
-        dashboard_agents = ["debug", "improve"]
+        dashboard_agents = ["debug", "improve", "predict", "review"]
 
     result["current_input"] = current_input
     result["model_name"] = model_name

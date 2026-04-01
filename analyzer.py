@@ -6,6 +6,7 @@ import ast
 import copy
 import hashlib
 import json
+import builtins
 import sys
 import re
 import time
@@ -674,6 +675,7 @@ class RealityAnalyzer:
     ) -> tuple[str, bool]:
         fixed_code = self._extract_fixed_code(response_text)
         repaired_from_invalid = False
+        needs_optimization_gate = language == "python" and self._requires_python_optimization(cleaned_code)
 
         if not fixed_code:
             fixed_code = self._generate_fixed_code_only(cleaned_code, language)
@@ -685,10 +687,15 @@ class RealityAnalyzer:
                 repaired_from_invalid = True
             else:
                 fixed_code = ""
+        if fixed_code and needs_optimization_gate:
+            if not self._passes_python_optimization_gate(cleaned_code, fixed_code):
+                fixed_code = ""
 
         if not fixed_code:
             heuristic_fixed = self._rule_based_fixed_code(cleaned_code, language)
             if heuristic_fixed and self._is_valid_fixed_code(heuristic_fixed, language):
+                if needs_optimization_gate and not self._passes_python_optimization_gate(cleaned_code, heuristic_fixed):
+                    heuristic_fixed = ""
                 fixed_code = heuristic_fixed
 
         return fixed_code, repaired_from_invalid
@@ -838,6 +845,9 @@ class RealityAnalyzer:
             f"- Return only {language} code\n"
             "- No markdown, no explanations\n"
             f"- Ensure code is syntactically valid {language}\n"
+            "- Do not use undefined identifiers\n"
+            "- Avoid introducing new global mutable state\n"
+            "- Keep behavior correct and improve algorithmic efficiency when obvious\n"
             "- Preserve intent while fixing bugs, edge cases, and robustness\n\n"
             f"{code_for_prompt}\n"
         )
@@ -921,7 +931,7 @@ class RealityAnalyzer:
         if not text:
             return False
         if language == "python":
-            return self._is_valid_python_code(text)
+            return self._is_valid_python_code(text) and not self._has_obvious_python_runtime_risks(text)
         # Non-Python: apply lightweight generic validity checks.
         if len(text) < 8:
             return False
@@ -929,6 +939,137 @@ class RealityAnalyzer:
             return False
         if text.count("(") != text.count(")"):
             return False
+        return True
+
+    @staticmethod
+    def _has_obvious_python_runtime_risks(code: str) -> bool:
+        """Returns True when simple static checks find unresolved names."""
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return True
+
+        builtin_names = set(dir(builtins))
+        module_defined: set[str] = set()
+
+        def _collect_target_names(target: ast.AST, out: set[str]) -> None:
+            if isinstance(target, ast.Name):
+                out.add(target.id)
+                return
+            if isinstance(target, (ast.Tuple, ast.List)):
+                for item in target.elts:
+                    _collect_target_names(item, out)
+
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                module_defined.add(node.name)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    module_defined.add((alias.asname or alias.name.split(".")[0]).strip())
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    module_defined.add((alias.asname or alias.name).strip())
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    _collect_target_names(target, module_defined)
+            elif isinstance(node, ast.AnnAssign):
+                _collect_target_names(node.target, module_defined)
+            elif isinstance(node, ast.AugAssign):
+                _collect_target_names(node.target, module_defined)
+
+        class FunctionRiskVisitor(ast.NodeVisitor):
+            def __init__(self, known_module: set[str], known_builtins: set[str]) -> None:
+                self.known_module = known_module
+                self.known_builtins = known_builtins
+                self.has_unresolved = False
+
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+                self._visit_function_like(node)
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: N802
+                self._visit_function_like(node)
+
+            def _visit_function_like(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+                local_names: set[str] = set()
+                global_names: set[str] = set()
+                nonlocal_names: set[str] = set()
+
+                for arg in node.args.posonlyargs + node.args.args + node.args.kwonlyargs:
+                    local_names.add(arg.arg)
+                if node.args.vararg is not None:
+                    local_names.add(node.args.vararg.arg)
+                if node.args.kwarg is not None:
+                    local_names.add(node.args.kwarg.arg)
+
+                for child in ast.walk(node):
+                    if isinstance(child, ast.Global):
+                        global_names.update(child.names)
+                    elif isinstance(child, ast.Nonlocal):
+                        nonlocal_names.update(child.names)
+                    elif isinstance(child, ast.Assign):
+                        for target in child.targets:
+                            _collect_target_names(target, local_names)
+                    elif isinstance(child, ast.AnnAssign):
+                        _collect_target_names(child.target, local_names)
+                    elif isinstance(child, ast.AugAssign):
+                        _collect_target_names(child.target, local_names)
+                    elif isinstance(child, ast.For):
+                        _collect_target_names(child.target, local_names)
+                    elif isinstance(child, ast.With):
+                        for item in child.items:
+                            if item.optional_vars is not None:
+                                _collect_target_names(item.optional_vars, local_names)
+                    elif isinstance(child, ast.comprehension):
+                        _collect_target_names(child.target, local_names)
+                    elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and child is not node:
+                        local_names.add(child.name)
+
+                for child in ast.walk(node):
+                    if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
+                        name = child.id
+                        if (
+                            name in local_names
+                            or name in global_names
+                            or name in nonlocal_names
+                            or name in self.known_module
+                            or name in self.known_builtins
+                        ):
+                            continue
+                        self.has_unresolved = True
+                        return
+
+        visitor = FunctionRiskVisitor(module_defined, builtin_names)
+        visitor.visit(tree)
+        return visitor.has_unresolved
+
+    @staticmethod
+    def _has_recursive_fibonacci_pattern(code: str) -> bool:
+        pattern = re.compile(
+            r"def\s+fibonacci\s*\([^)]*\)\s*:[\s\S]*?return\s+fibonacci\s*\([^)]*\)\s*\+\s*fibonacci\s*\([^)]*\)",
+            flags=re.IGNORECASE,
+        )
+        return bool(pattern.search(code))
+
+    @staticmethod
+    def _has_bubble_sort_range_n_pattern(code: str) -> bool:
+        has_range_n = re.search(r"for\s+j\s+in\s+range\(\s*n\s*\)\s*:", code) is not None
+        has_next_index = re.search(r"arr\s*\[\s*j\s*\+\s*1\s*\]", code) is not None
+        return has_range_n and has_next_index
+
+    def _requires_python_optimization(self, code: str) -> bool:
+        return self._has_recursive_fibonacci_pattern(code) or self._has_bubble_sort_range_n_pattern(code)
+
+    def _passes_python_optimization_gate(self, original_code: str, fixed_code: str) -> bool:
+        original_has_recursive_fib = self._has_recursive_fibonacci_pattern(original_code)
+        fixed_has_recursive_fib = self._has_recursive_fibonacci_pattern(fixed_code)
+        if original_has_recursive_fib and fixed_has_recursive_fib:
+            return False
+
+        original_has_bad_bubble = self._has_bubble_sort_range_n_pattern(original_code)
+        fixed_has_bad_bubble = self._has_bubble_sort_range_n_pattern(fixed_code)
+        if original_has_bad_bubble and fixed_has_bad_bubble:
+            return False
+
         return True
 
     @staticmethod
@@ -954,6 +1095,24 @@ class RealityAnalyzer:
             r"\1\2if not arr:\n\2    return None\n\2\3",
             fixed,
         )
+
+        # Fibonacci optimization fallback: recursive O(2^n) -> iterative O(n).
+        fibonacci_pattern = re.compile(
+            r"def\s+fibonacci\s*\(\s*n\s*\)\s*:\s*[\s\S]*?return\s+fibonacci\s*\(\s*n\s*-\s*1\s*\)\s*\+\s*fibonacci\s*\(\s*n\s*-\s*2\s*\)",
+            flags=re.MULTILINE,
+        )
+        fibonacci_replacement = (
+            "def fibonacci(n):\n"
+            "    if n < 0:\n"
+            "        raise ValueError(\"n must be non-negative\")\n"
+            "    if n <= 1:\n"
+            "        return n\n"
+            "    a, b = 0, 1\n"
+            "    for _ in range(2, n + 1):\n"
+            "        a, b = b, a + b\n"
+            "    return b"
+        )
+        fixed = fibonacci_pattern.sub(fibonacci_replacement, fixed)
 
         return fixed
 

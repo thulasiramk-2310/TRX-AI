@@ -9,6 +9,7 @@ from typing import Any
 
 from rich.box import ROUNDED
 from rich.console import Console
+from rich.markup import escape
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
@@ -180,11 +181,17 @@ class OutputFormatter:
 
         return "\n".join(lines)
 
-    @staticmethod
-    def _progress_bar(percent: int, width: int = 26) -> str:
+    def _supports_utf8(self) -> bool:
+        stream = getattr(self.console, "file", None)
+        encoding = str(getattr(stream, "encoding", "") or "").lower()
+        return "utf" in encoding
+
+    def _progress_bar(self, percent: int, width: int = 26) -> str:
         clamped = max(0, min(100, int(percent)))
         filled = int((clamped / 100.0) * width)
-        return "|" + ("#" * filled) + ("-" * (width - filled)) + "|"
+        if self._supports_utf8():
+            return "[" + ("█" * filled) + ("░" * (width - filled)) + "]"
+        return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
 
     @staticmethod
     def _markdown_from_items(items: list[str], fallback: str, *, limit: int = 6) -> str:
@@ -275,15 +282,44 @@ class OutputFormatter:
         return collected
 
     def _smooth_print(self, renderable: Any) -> None:
-        self.console.print(renderable)
+        try:
+            self.console.print(renderable)
+        except UnicodeEncodeError:
+            safe_text = self._renderable_to_safe_text(renderable)
+            self.console.print(safe_text)
         if self.ui_transitions:
             time.sleep(max(0.04, min(0.18, self.ui_transition_delay / 2.5)))
 
+    def _renderable_to_safe_text(self, renderable: Any) -> str:
+        with self.console.capture() as capture:
+            self.console.print(renderable)
+        rendered = capture.get()
+        stream = getattr(self.console, "file", None)
+        encoding = getattr(stream, "encoding", None) or "utf-8"
+        return rendered.encode(encoding, errors="replace").decode(encoding, errors="replace")
+
     def _build_modules_panel(self, analysis: dict[str, Any]) -> Panel:
+        active = {
+            str(item).strip().lower()
+            for item in analysis.get("active_agents", [])
+            if str(item).strip()
+        }
+        current_input = str(analysis.get("current_input", "")).strip().lower()
+        statuses = [str(item).lower() for item in analysis.get("system_status", [])]
+        intent = str(analysis.get("intent", "")).lower()
+        is_review_flow = (
+            intent == "review"
+            or current_input.startswith("review ")
+            or current_input.startswith("fix ")
+            or any("intent=review" in item for item in statuses)
+            or bool(str(analysis.get("fixed_code", "")).strip())
+        )
+
         rows = [
-            ("[D]", "Debug Agent", True),
-            ("[I]", "Improve Agent", True),
-            ("[P]", "Predict Agent", False),
+            ("[D]", "Debug Agent", ("debug" in active) or is_review_flow),
+            ("[I]", "Improve Agent", ("improve" in active) or is_review_flow),
+            ("[P]", "Predict Agent", ("predict" in active) or is_review_flow),
+            ("[R]", "Review Agent", ("review" in active) or is_review_flow),
         ]
 
         modules = Table.grid(expand=True)
@@ -483,6 +519,7 @@ class OutputFormatter:
         model_name = str(analysis.get("model_name", "qwen3:8b"))
         score = int(analysis.get("confidence_score", int(float(analysis.get("intent_confidence", 0.8)) * 100)))
         run_label = total_runs if total_runs is not None else "-"
+        score_bar = escape(self._progress_bar(score, width=12))
 
         status = Table.grid(expand=True)
         status.add_column(ratio=1)
@@ -493,7 +530,7 @@ class OutputFormatter:
             f"[bold]Run:[/bold] {run_label}",
             f"[bold]Model:[/bold] {model_name[:14]}",
             f"[bold]Mode:[/bold] {mode}",
-            f"[bold]Score:[/bold] {score}% [bright_cyan]{self._progress_bar(score, width=12)}[/bright_cyan]",
+            f"[bold]Score:[/bold] {score}% [bright_cyan]{score_bar}[/bright_cyan]",
         )
 
         return Panel(
@@ -509,15 +546,25 @@ class OutputFormatter:
         if not analysis.get("current_input"):
             analysis["current_input"] = "Enter problem or code..."
 
+        width = self.console.size.width
+        modules = self._build_modules_panel(analysis)
+        analysis_panel = self._build_analysis_panel(analysis)
+        input_results = self._build_input_results_panel(analysis)
+
         grid = Table.grid(expand=True)
-        grid.add_column(ratio=24)
-        grid.add_column(ratio=46)
-        grid.add_column(ratio=30)
-        grid.add_row(
-            self._build_modules_panel(analysis),
-            self._build_analysis_panel(analysis),
-            self._build_input_results_panel(analysis),
-        )
+        if width < 110:
+            # Compact stacked layout for narrow terminals.
+            grid.add_column(ratio=1)
+            if width >= 85:
+                grid.add_row(modules)
+            grid.add_row(analysis_panel)
+            grid.add_row(input_results)
+        else:
+            # Wide layout with three columns.
+            grid.add_column(ratio=24)
+            grid.add_column(ratio=46)
+            grid.add_column(ratio=30)
+            grid.add_row(modules, analysis_panel, input_results)
 
         shell = Panel(
             grid,
@@ -530,6 +577,8 @@ class OutputFormatter:
             expand=True,
         )
 
+        # Redraw dashboard cleanly so prompt interaction doesn't keep pushing prior frames upward.
+        self.console.clear()
         self._smooth_print(shell)
         self._smooth_print(self._build_status_bar(analysis, mode, total_runs))
 
@@ -548,33 +597,36 @@ class OutputFormatter:
             "model_name": model_name,
             "active_agents": active_agents,
             "debug_analysis": [
-                "help - show command guide",
-                "history - list previous prompts",
-                "save [path] - save session history",
-                "export <file> - export latest report",
-                "export compare [file] - export comparison PDF",
+                "help -> Show this command guide. Example: help",
+                "history -> List previous prompts. Example: history",
+                "save <path> -> Save session history JSON. Example: save sessions/my_run.json",
+                "export <file> -> Export latest analysis report (.txt/.pdf). Example: export review_report.pdf",
+                "export compare <file> -> Compare last two analyses in PDF. Example: export compare run_diff.pdf",
             ],
             "improvements": [
-                "review <file|folder> - run code review",
-                "fix <file> - generate corrected code",
-                "watch <folder> - monitor and auto-review changes",
-                "agents all | agents debug improve predict - control modules",
+                "review <file|folder> -> Run code review. Example: review dsa_test.py",
+                "fix <file> -> Generate fixed code with preview + confirm (y/n). Example: fix demo.py",
+                "watch <folder> -> Auto-review changes in supported code files. Example: watch .",
+                "agents all | agents debug improve predict -> Control agent modules. Example: agents all",
             ],
             "predictions": [
-                "mode debug|optimize|predict - change analysis mode",
-                "For best code review quality: review one focused file first",
-                "Use fix after review to generate and inspect corrected code",
+                "mode debug|optimize|predict -> Change analysis profile. Example: mode optimize",
+                "Model in use: " + model_name,
+                "Supported exit commands: exit, quit, or Ctrl+C",
+                "Best flow: review file -> inspect output -> fix file -> export report",
             ],
             "final_insight": [
-                "Quick Start: review dsa_test.py",
-                "Ask direct questions naturally: what is IDS full form",
-                "Use Ctrl+C to cancel long operations safely",
+                "Quick Start 1: review dsa_test.py",
+                "Quick Start 2: fix dsa_test.py",
+                "Quick Start 3: export report.pdf",
+                "Tip: Keep review targets focused (single file) for higher quality fixes",
             ],
             "system_status": [
                 "help_view",
                 "source=local_commands",
                 "ui=dashboard",
                 "loader=enabled",
+                f"model={model_name}",
             ],
             "confidence_score": 100,
         }
