@@ -1,6 +1,7 @@
 ﻿# Evaluation
 
 TRX-AI includes an evaluation and benchmarking module in `evaluation.py`.
+For end-to-end runtime validation (routing, fallback, cache, observability), use `smoke_e2e.py`.
 
 ## Dataset
 
@@ -53,3 +54,18 @@ Completeness: 90%
 - benchmark terminal output
 - accuracy graph image
 - evaluation screenshot
+- `sessions/smoke_e2e_report.json` (machine-readable pass/fail matrix)
+
+## Smoke E2E
+
+Run:
+
+```bash
+python smoke_e2e.py --disable-llm
+```
+
+This emits a deterministic JSON report containing:
+
+- overall score out of 10
+- category summaries
+- per-test pass/fail matrix
