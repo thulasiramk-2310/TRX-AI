@@ -356,13 +356,22 @@ class OutputFormatter:
             chat_response = str(analysis.get("chat_response", "I am here to help.")).strip()
             if not chat_response:
                 chat_response = "I am here to help."
+            confidence_label = "High" if analysis.get("analysis_source") == "llm" else "Medium"
+            branded = (
+                "[TRX RESPONSE]\n\n"
+                "💬 Response:\n"
+                f"{chat_response}\n\n"
+                "Insight:\n"
+                "Ask follow-up questions for deeper detail.\n\n"
+                f"Confidence: {confidence_label}"
+            )
 
             body = Table.grid(expand=True)
             body.add_column(ratio=1)
             body.add_row(
                 Panel(
-                    Markdown(chat_response, code_theme="monokai"),
-                    title="[bold]ASSISTANT RESPONSE[/bold]",
+                    Markdown(branded, code_theme="monokai"),
+                    title="[bold]TRX RESPONSE[/bold]",
                     border_style="#7dd3fc",
                     box=ROUNDED,
                     style="on #102030",
