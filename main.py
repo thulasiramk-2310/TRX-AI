@@ -1,4 +1,4 @@
-﻿"""Reality Debugger CLI entry point."""
+﻿"""TRX CLI entry point."""
 
 from __future__ import annotations
 
@@ -22,21 +22,23 @@ from analyzer import RealityAnalyzer
 from config import AppConfig
 from formatter import OutputFormatter
 from history import SessionHistory
+from mcp_graph import detect_mcp_graph_status
+from observability import METRICS
 try:
     from watcher import start_watcher
 except Exception:  # pragma: no cover - optional runtime dependency
     start_watcher = None
 
 LOGO_LINES = [
-    "████████╗██████╗ ██╗  ██╗      █████╗ ██╗",
-    "╚══██╔══╝██╔══██╗╚██╗██╔╝     ██╔══██╗██║",
-    "   ██║   ██████╔╝ ╚███╔╝█████╗███████║██║",
-    "   ██║   ██╔══██╗ ██╔██╗╚════╝██╔══██║██║",
-    "   ██║   ██║  ██║██╔╝ ██╗     ██║  ██║██║",
-    "   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝     ╚═╝  ╚═╝╚═╝",
+    "████████╗██████╗ ██╗  ██╗",
+    "╚══██╔══╝██╔══██╗╚██╗██╔╝",
+    "   ██║   ██████╔╝ ╚███╔╝ ",
+    "   ██║   ██╔══██╗ ██╔██╗ ",
+    "   ██║   ██║  ██║██╔╝ ██╗",
+    "   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝",
 ]
 ASCII_LOGO_LINES = [
-    "TRX-AI",
+    "TRX",
 ]
 RUN_HISTORY_PATH = Path("sessions") / "run_history.jsonl"
 SUPPORTED_CODE_SUFFIXES = {
@@ -46,19 +48,11 @@ SUPPORTED_CODE_SUFFIXES = {
 
 
 def _build_cli_prompt(console: Console, mode: str) -> str:
-    cwd_name = Path.cwd().name or "/"
-    cwd_label = "WORKSPACE" if cwd_name.lower() == "trx-ai" else cwd_name
     mode_label = mode.upper()
 
     if not console.color_system:
-        return f"trx-ai[{mode}] {cwd_name} >"
-
-    return (
-        "[bold #0f172a on #86efac] TRX-AI [/]"
-        f"[bold #e2e8f0 on #0f172a] {cwd_label} [/]"
-        f"[bold #0f172a on #67e8f9] {mode_label} [/]"
-        "[#67e8f9][/] [bold #22c55e]❯[/]"
-    )
+        return f"trx[{mode}] >"
+    return f"[bold #0f172a on #86efac] trx[{mode_label.lower()}] [/][bold #22c55e] >[/]"
 
 
 def _loader_text_for_prompt(user_input: str) -> str:
@@ -122,7 +116,8 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
     )
     history = SessionHistory()
 
-    mode = "debug"
+    mode = str(config.assistant_mode or "auto").lower()
+    analysis_profile = "debug"
     total_analyses = 0
     active_watchers: list[Any] = []
 
@@ -137,7 +132,7 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
             user_input = prompt(_build_cli_prompt(console, mode)).strip()
         except (KeyboardInterrupt, EOFError):
             _shutdown_watchers(active_watchers)
-            console.print("\nExiting Reality Debugger. Goodbye!", style="cyan")
+            console.print("\nExiting TRX. Goodbye!", style="cyan")
             break
 
         if not user_input:
@@ -150,20 +145,100 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
         if command in {"exit", "quit"}:
             _run_with_prompt_loader(console, user_input, lambda: None)
             _shutdown_watchers(active_watchers)
-            console.print("Exiting Reality Debugger. Goodbye!", style="cyan")
+            console.print("Exiting TRX. Goodbye!", style="cyan")
             break
+
+        if command in {"chat", "code", "auto"}:
+            mode = command
+            config.assistant_mode = "general" if mode == "chat" else mode
+            console.print(f"Mode switched: {mode.upper()}", style="cyan")
+            continue
+
+        if command == "status":
+            status = analyzer.runtime_status()
+            snap = METRICS.snapshot()
+            counters = snap.get("counters", {})
+            states = snap.get("states", {})
+            averages = snap.get("averages", {})
+            cache_hit = int(counters.get("cache_hit", 0))
+            cache_miss = int(counters.get("cache_miss", 0))
+            total_cache = cache_hit + cache_miss
+            cache_hit_rate = int((cache_hit / total_cache) * 100) if total_cache > 0 else 0
+            avg_latency = int(float(averages.get("latency_ms", 0.0)))
+            console.print("\nTRX STATUS", style="bold cyan")
+            console.print(f"Mode: {mode.upper()}")
+            console.print(f"Graph Transport: {status.get('graph_transport', 'LOCAL')}")
+            console.print(f"MCP: {'ACTIVE' if status.get('mcp_active') else 'DEGRADED'}")
+            console.print(f"Breaker: {status.get('circuit_breaker_state', states.get('circuit_breaker_state', 'CLOSED'))}")
+            console.print(f"Cache: HIT {cache_hit_rate}%")
+            console.print(f"Cache TTL: {int(status.get('cache_ttl_seconds', 0))}s")
+            console.print(f"Latency: {avg_latency}ms avg")
+            console.print(f"Cache: {'ENABLED' if status.get('cache_enabled') else 'DISABLED'}")
+            console.print(f"LLM: {'CONNECTED' if status.get('llm_connected') else 'DISCONNECTED'}")
+            continue
+
+        if command == "cache clear":
+            analyzer.clear_caches()
+            console.print("Cache cleared.", style="green")
+            continue
+
+        if command.startswith("correct "):
+            if len(command_parts) < 3:
+                _print_error(console, "Usage: correct \"<text>\" code|general")
+                continue
+            route = command_parts[-1].lower().strip()
+            text = user_input[len("correct "):].strip()
+            if text.lower().endswith(f" {route}"):
+                text = text[: -(len(route) + 1)].strip()
+            text = text.strip('"').strip("'").strip()
+            try:
+                analyzer.apply_feedback(text, route)
+                console.print("[OK] TRX learned from feedback.", style="green")
+            except ValueError as exc:
+                _print_error(console, str(exc))
+            continue
+
+        if command.startswith("metrics export"):
+            path = "sessions/metrics.json"
+            if len(command_parts) > 2:
+                path = " ".join(command_parts[2:]).strip()
+            out = METRICS.export(path)
+            console.print(f"[OK] Metrics exported: {out}", style="green")
+            continue
 
         if command == "help":
             _run_with_prompt_loader(
                 console,
                 user_input,
                 lambda: formatter.render_help_dashboard(
-                    mode=mode,
+                    mode=analysis_profile,
                     total_runs=total_analyses,
                     model_name=config.local_llm_model,
                     active_agents=analyzer.active_agents(),
                 ),
             )
+            continue
+
+        if command.startswith("explain "):
+            question = user_input[len("explain "):].strip().strip('"').strip("'")
+            if not question:
+                _print_error(console, "Usage: explain \"<question>\"")
+                continue
+            config.assistant_mode = "general"
+            result = _run_with_prompt_loader(
+                console,
+                user_input,
+                lambda: analyzer.analyze(question, mode=analysis_profile, past_context=[]),
+            )
+            _attach_ui_context(
+                result,
+                current_input=user_input,
+                model_name=config.local_llm_model,
+                active_agents=analyzer.active_agents(),
+            )
+            formatter.render(result, analysis_profile, total_runs=total_analyses)
+            history.add_entry(user_input, analysis_profile, result)
+            _append_run_history(user_input, analysis_profile, result)
             continue
 
         if command == "history":
@@ -214,7 +289,7 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                             compare_name,
                             first_input=str(first_entry.get("input", "")),
                             second_input=str(second_entry.get("input", "")),
-                            mode=str(second_entry.get("mode", mode)),
+                            mode=str(second_entry.get("mode", analysis_profile)),
                             first_structured_output=first_structured,
                             second_structured_output=second_structured,
                             first_label="Run 1",
@@ -249,7 +324,7 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                         lambda: history.export_pdf_report(
                             report_name,
                             str(latest.get("input", "")),
-                            str(latest.get("mode", mode)),
+                            str(latest.get("mode", analysis_profile)),
                             structured,
                         ),
                     )
@@ -260,7 +335,7 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                         lambda: history.export_report(
                             report_name,
                             user_input=str(latest.get("input", "")),
-                            mode=str(latest.get("mode", mode)),
+                            mode=str(latest.get("mode", analysis_profile)),
                             structured_output=structured,
                         ),
                     )
@@ -283,8 +358,8 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
 
         if command in {"mode debug", "mode optimize", "mode predict"}:
             _run_with_prompt_loader(console, user_input, lambda: None)
-            mode = command.split()[1]
-            console.print(f"Fallback profile: {mode.upper()}", style="cyan")
+            analysis_profile = command.split()[1]
+            console.print(f"Fallback profile: {analysis_profile.upper()}", style="cyan")
             _print_dashboard(console, config, total_analyses, analyzer)
             continue
 
@@ -299,7 +374,7 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
 
             target = " ".join(command_parts[1:]).strip()
             try:
-                code_blob = _load_review_target(target)
+                code_blob = _load_review_target(target, config=config)
                 result = _run_with_prompt_loader(
                     console,
                     user_input,
@@ -314,7 +389,7 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                     model_name=config.local_llm_model,
                     active_agents=analyzer.active_agents(),
                 )
-                formatter.render(result, mode, total_runs=total_analyses)
+                formatter.render(result, analysis_profile, total_runs=total_analyses)
                 history.add_entry(f"review {target}", "review", result)
                 _append_run_history(f"review {target}", "review", result)
                 _print_dashboard(console, config, total_analyses, analyzer)
@@ -364,7 +439,7 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                     model_name=config.local_llm_model,
                     active_agents=analyzer.active_agents(),
                 )
-                formatter.render(result, mode, total_runs=total_analyses)
+                formatter.render(result, analysis_profile, total_runs=total_analyses)
                 history.add_entry(f"fix {target}", "fix", result)
                 _append_run_history(f"fix {target}", "fix", result)
 
@@ -452,7 +527,7 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
             result = _run_with_prompt_loader(
                 console,
                 user_input,
-                lambda: analyzer.analyze(user_input, mode=mode, past_context=context),
+                lambda: analyzer.analyze(user_input, mode=analysis_profile, past_context=context),
             )
             if result.get("response_mode") == "analysis":
                 total_analyses += 1
@@ -462,9 +537,9 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                 model_name=config.local_llm_model,
                 active_agents=analyzer.active_agents(),
             )
-            formatter.render(result, mode, total_runs=total_analyses)
-            history.add_entry(user_input, mode, result)
-            _append_run_history(user_input, mode, result)
+            formatter.render(result, analysis_profile, total_runs=total_analyses)
+            history.add_entry(user_input, analysis_profile, result)
+            _append_run_history(user_input, analysis_profile, result)
             _print_dashboard(console, config, total_analyses, analyzer)
         except KeyboardInterrupt:
             console.print("\n[Cancelled] Request interrupted by user.", style="yellow")
@@ -527,8 +602,12 @@ def _print_fix_diff_preview(
         console.print(f"... diff truncated ({len(diff_lines) - max_preview_lines} more lines)", style="dim")
 
 
-def _load_review_target(target: str) -> str:
+def _load_review_target(target: str, *, config: AppConfig | None = None) -> str:
     path = Path(target)
+    cfg = config or AppConfig.from_env()
+    max_chars = max(8000, int(cfg.review_target_max_chars))
+    excluded_dirs = {name.lower() for name in cfg.review_excluded_dirs}
+
     if not path.exists():
         raise FileNotFoundError(target)
 
@@ -540,25 +619,41 @@ def _load_review_target(target: str) -> str:
         content = path.read_text(encoding="utf-8")
         if not content.strip():
             raise ValueError(f"Empty file: {path}")
-        return f"# FILE: {path.name}\n\n{content}"
+        return f"# FILE: {path.name}\n\n{content[:max_chars]}"
 
     if not path.is_dir():
         raise IsADirectoryError(target)
 
-    code_files = sorted(
-        file_path for file_path in path.rglob("*")
-        if file_path.is_file() and file_path.suffix.lower() in SUPPORTED_CODE_SUFFIXES
-    )
+    code_files: list[Path] = []
+    for file_path in path.rglob("*"):
+        if not file_path.is_file():
+            continue
+        if file_path.suffix.lower() not in SUPPORTED_CODE_SUFFIXES:
+            continue
+        try:
+            relative_parts = [part.lower() for part in file_path.relative_to(path).parts[:-1]]
+        except ValueError:
+            relative_parts = []
+        if any(part in excluded_dirs for part in relative_parts):
+            continue
+        code_files.append(file_path)
+    code_files.sort()
     if not code_files:
         raise ValueError("No supported code files found in folder.")
 
     chunks: list[str] = []
+    total_chars = 0
     for file_path in code_files:
         content = file_path.read_text(encoding="utf-8")
         if not content.strip():
             continue
         relative_name = file_path.relative_to(path)
-        chunks.append(f"# FILE: {relative_name}\n\n{content}")
+        remaining = max_chars - total_chars
+        if remaining <= 0:
+            break
+        clipped = content[:remaining]
+        chunks.append(f"# FILE: {relative_name}\n\n{clipped}")
+        total_chars += len(clipped)
 
     if not chunks:
         raise ValueError("All discovered supported code files are empty.")
@@ -743,9 +838,10 @@ def run_history_mode(limit: int = 20) -> None:
         )
 
 
-def run_analyze_mode(text: str, mode: str = "debug", debug: bool = False) -> None:
+def run_analyze_mode(text: str, mode: str = "debug", debug: bool = False, debug_cache: bool = False) -> None:
     config = AppConfig.from_env()
     config.dev_mode = debug
+    config.debug_cache = debug_cache
     analyzer = RealityAnalyzer(config)
     formatter = OutputFormatter(Console())
 
@@ -756,8 +852,108 @@ def run_analyze_mode(text: str, mode: str = "debug", debug: bool = False) -> Non
         model_name=config.local_llm_model,
         active_agents=analyzer.active_agents(),
     )
+    if mode == "debug" and isinstance(result.get("routing_debug"), dict):
+        _print_routing_debug(result)
     formatter.render(result, mode, total_runs=0)
     _append_run_history(text, mode, result)
+
+
+def _print_routing_debug(result: dict[str, Any]) -> None:
+    info = result.get("routing_debug", {})
+    if not isinstance(info, dict):
+        return
+    print("\n[TRX DEBUG]\n")
+    print(f"Intent: {info.get('intent', 'unknown')}")
+    print(f"Confidence: {info.get('confidence', 0.0)}")
+    print(f"Threshold: {info.get('threshold', 0.0)}\n")
+    encoding = (getattr(getattr(__import__("sys"), "stdout", None), "encoding", "") or "").lower()
+    use_unicode = "utf" in encoding
+    print("Signals:")
+    signals = info.get("signals", {})
+    if isinstance(signals, dict):
+        for key, value in signals.items():
+            mark = ("✔" if bool(value) else "✖") if use_unicode else ("[OK]" if bool(value) else "[NO]")
+            print(f"  {mark} {key}: {bool(value)}")
+    final_route = str(result.get("intent", "general")).upper()
+    print(f"\nFinal Route: {final_route}")
+    print(f"\nLatency: {int(result.get('elapsed_ms', 0))}ms")
+    print(f"Cache: {'HIT' if bool(result.get('cache_hit')) else 'MISS'}")
+    cache_debug = result.get("cache_debug", {})
+    if isinstance(cache_debug, dict) and cache_debug:
+        print(f"TTL Remaining: {cache_debug.get('ttl_remaining_s', 0)}s")
+        print(f"Fingerprint: {cache_debug.get('fingerprint', 'n/a')}")
+    print(f"MCP: {result.get('mcp_query_status', 'UNKNOWN')}")
+    print(f"Breaker: {result.get('circuit_breaker_state', 'CLOSED')}")
+
+
+def run_analyze_mode_explain_routing(text: str, mode: str = "debug", debug: bool = False) -> None:
+    config = AppConfig.from_env()
+    config.dev_mode = debug
+    analyzer = RealityAnalyzer(config)
+    result = analyzer.analyze(text, mode=mode, past_context=[])
+    _print_routing_debug(result)
+
+
+def run_test_mode(debug: bool = False) -> None:
+    config = AppConfig.from_env()
+    config.dev_mode = debug
+    config.assistant_mode = "auto"
+    analyzer = RealityAnalyzer(config)
+
+    def _route(query: str) -> str:
+        result = analyzer.analyze(query, mode="debug", past_context=[])
+        if str(result.get("response_mode", "")).lower() == "analysis":
+            return "code"
+        intent = str(result.get("intent", "general")).lower()
+        if intent in {"review", "code", "problem"}:
+            return "code"
+        return "general"
+
+    tests: list[tuple[str, str, str, Callable[[], bool]]] = [
+        ("Routing", "hi", "general", lambda: _route("hi") == "general"),
+        ("Routing", "fix login bug in auth.py", "code", lambda: _route("fix login bug in auth.py") == "code"),
+        ("General Mode", "what is data warehouse", "direct chat response", lambda: "the user asked" not in str(analyzer.analyze("what is data warehouse").get("chat_response", "")).lower()),
+        ("Code Mode", "def add(a,b): return a+b", "analysis/chat without crash", lambda: analyzer.analyze("def add(a,b):\n return a+b").get("response_mode") in {"analysis", "chat"}),
+        ("Semantic", "improve API performance", "code preferred", lambda: _route("improve API performance") == "code"),
+        ("Fallback", "what u can do", "friendly capability shortcut", lambda: "I can help you with" in str(analyzer.analyze("what u can do").get("chat_response", ""))),
+        ("Observability", "status fields", "breaker + mcp visible", lambda: isinstance(analyzer.analyze("hello").get("system_health"), dict)),
+    ]
+
+    by_category: dict[str, list[bool]] = {}
+    for category, _query, _expected, runner in tests:
+        ok = False
+        try:
+            ok = bool(runner())
+        except Exception:
+            ok = False
+        by_category.setdefault(category, []).append(ok)
+
+    encoding = (getattr(getattr(__import__("sys"), "stdout", None), "encoding", "") or "").lower()
+    use_unicode = "utf" in encoding
+    pass_icon = "✅" if use_unicode else "[PASS]"
+    fail_icon = "❌" if use_unicode else "[FAIL]"
+    partial_icon = "⚠" if use_unicode else "[PARTIAL]"
+
+    def category_status(name: str) -> str:
+        vals = by_category.get(name, [])
+        if not vals:
+            return f"{partial_icon} PARTIAL"
+        passed = sum(1 for x in vals if x)
+        if passed == len(vals):
+            return f"{pass_icon} PASS"
+        if passed == 0:
+            return f"{fail_icon} FAIL"
+        return f"{partial_icon} PARTIAL"
+
+    categories = ["Routing", "General Mode", "Code Mode", "Semantic", "Fallback", "Observability"]
+    score_raw = sum(sum(1 for x in by_category.get(cat, []) if x) for cat in categories)
+    score_total = sum(len(by_category.get(cat, [])) for cat in categories)
+    score = (score_raw / score_total) * 10 if score_total else 0.0
+
+    print("TRX TEST SUITE\n")
+    for cat in categories:
+        print(f"{cat:<15} {category_status(cat)}")
+    print(f"\nOverall Score: {score:.1f} / 10")
 
 
 def _shutdown_watchers(observers: list[Any]) -> None:
@@ -791,7 +987,10 @@ def _print_startup(console: Console) -> None:
 
     for line in logo_lines:
         console.print(Align.center(f"[bold cyan]{line}[/bold cyan]"))
-    console.print(Align.center("[dim]Reality Debugger[/dim]"))
+    console.print(Align.center("[bold]TRX — Think. Reason. Execute.[/bold]"))
+    console.print(Align.center("[dim]Mode: AUTO (General + Code)[/dim]"))
+    graph = detect_mcp_graph_status()
+    console.print(Align.center(f"[dim]Graph: {'ACTIVE' if graph.exists and graph.state == 'ready' else 'DEGRADED'}[/dim]"))
 
     spinner = Spinner("dots", text="Initializing system...", style="cyan")
     with Live(Align.center(spinner), console=console, refresh_per_second=20, transient=True):
@@ -801,19 +1000,20 @@ def _print_startup(console: Console) -> None:
 
 
 def _print_help(console: Console) -> None:
-    console.print("Commands:", style="cyan")
+    console.print("TRX Commands:", style="cyan")
+    console.print("chat | code | auto - Switch assistant mode")
+    console.print("status - Show TRX runtime status")
+    console.print("cache clear - Clear response caches")
+    console.print("correct \"<text>\" code|general - Apply routing feedback")
+    console.print("metrics export [path] - Export runtime metrics JSON")
+    console.print("test - Run TRX end-to-end smoke suite")
     console.print("help - Show available commands")
-    console.print("history - Show previous inputs")
-    console.print("save <path> - Save session")
-    console.print("export <file> - Export last analysis")
-    console.print("export compare <file> - Export comparison PDF from latest two analyses")
     console.print("review <code_file | folder_path> - Run multi-agent code review")
     console.print("fix <code_file> - Generate and save auto-fixed code as <name>_fixed.<ext>")
-    console.print("watch <folder> - Watch Python files and auto-review on change")
-    console.print("agents all | agents debug improve predict - Agent control")
+    console.print("explain \"<question>\" - Ask a general question")
+    console.print("history | save | export | watch | agents")
     console.print("mode debug|optimize|predict - Fallback profile")
-    console.print("exit | quit - Close Reality Debugger")
-    console.print("Ctrl+C - Force quit the CLI")
+    console.print("exit | quit - Close TRX")
 
 
 def _print_startup_warnings(console: Console, config: AppConfig) -> None:
@@ -821,7 +1021,9 @@ def _print_startup_warnings(console: Console, config: AppConfig) -> None:
     local_enabled = config.use_local_llm
 
     if not env_missing and local_enabled:
-        return
+        graph_status = detect_mcp_graph_status()
+        if graph_status.exists and graph_status.state == "ready":
+            return
 
     warning_lines: list[str] = []
     if env_missing:
@@ -831,6 +1033,12 @@ def _print_startup_warnings(console: Console, config: AppConfig) -> None:
     if not local_enabled:
         warning_lines.append("- RD_USE_LOCAL_LLM is disabled.")
         warning_lines.append("- Enable local AI by setting RD_USE_LOCAL_LLM=true in .env.")
+    graph_status = detect_mcp_graph_status()
+    if not graph_status.exists:
+        warning_lines.append("- MCP graph database missing at .code-review-graph/graph.db.")
+        warning_lines.append("- Reviews will still run with LLM/rule fallback but graph context is unavailable.")
+    elif graph_status.state != "ready":
+        warning_lines.append(f"- MCP graph database state is '{graph_status.state}' and may be unusable.")
 
     for line in warning_lines:
         wrapped = textwrap.fill(
@@ -843,7 +1051,7 @@ def _print_startup_warnings(console: Console, config: AppConfig) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="TRX-AI CLI")
+    parser = argparse.ArgumentParser(description="TRX CLI")
     subparsers = parser.add_subparsers(dest="command")
 
     p_benchmark = subparsers.add_parser("benchmark", help="Run benchmark mode")
@@ -857,6 +1065,11 @@ if __name__ == "__main__":
     p_analyze.add_argument("text", type=str)
     p_analyze.add_argument("--mode", type=str, default="debug", choices=["debug", "optimize", "predict"])
     p_analyze.add_argument("--debug", action="store_true")
+    p_analyze.add_argument("--debug-cache", action="store_true")
+    p_analyze.add_argument("--explain-routing", action="store_true")
+
+    p_test = subparsers.add_parser("test", help="Run TRX smoke test suite")
+    p_test.add_argument("--debug", action="store_true")
 
     args = parser.parse_args()
     if args.command == "benchmark":
@@ -864,6 +1077,13 @@ if __name__ == "__main__":
     elif args.command == "history":
         run_history_mode(limit=args.limit)
     elif args.command == "analyze":
-        run_analyze_mode(text=args.text, mode=args.mode, debug=args.debug)
+        if args.explain_routing:
+            run_analyze_mode_explain_routing(text=args.text, mode=args.mode, debug=args.debug)
+        else:
+            run_analyze_mode(text=args.text, mode=args.mode, debug=args.debug, debug_cache=args.debug_cache)
+    elif args.command == "test":
+        run_test_mode(debug=args.debug)
     else:
         run_cli()
+
+
