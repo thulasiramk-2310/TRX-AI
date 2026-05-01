@@ -17,9 +17,118 @@ from typing import Any
 import requests
 
 from config import AppConfig
+from conversation_memory import ConversationMemory
+from graph_query_adapter import CodeReviewGraphAdapter
+from mcp_graph import detect_mcp_graph_status
+from observability import METRICS, log_event
+from router_memory import RouterMemory
+from semantic_router import SemanticRouter
 
 
-TRX_GREETING = "Hey! I'm TRX-AI - your personal reasoning assistant. How can I help you today?"
+TRX_GREETING = "Hi there! 😊 What can I help you with today?"
+BASIC_KB = {
+    "data warehouse": "A data warehouse is a centralized system used to store and analyze large structured datasets for reporting and business intelligence.",
+    "network": "A network is a system of interconnected computers and devices that communicate and share resources.",
+}
+STRONG_CODE_HINTS = ["fix", "bug", "error", "exception", "stacktrace"]
+TECH_HINTS = [
+    "optimize", "performance", "latency",
+    "api", "system", "database", "backend",
+    "faster", "slow", "throughput", "login",
+]
+
+
+def classify_intent(text: str) -> str:
+    text = text.lower().strip()
+
+    if text.startswith(("what is", "define", "explain")):
+        return "theory"
+
+    if any(k in text for k in ["review", "fix", "code", "bug"]):
+        return "code"
+
+    if any(k in text for k in ["i failed", "improve", "problem"]):
+        return "problem"
+
+    return "chat"
+
+
+def is_general_question(text: str) -> bool:
+    keywords = ["what is", "explain", "define", "how does", "why"]
+    normalized = text.lower().strip()
+    return any(normalized.startswith(keyword) for keyword in keywords)
+
+
+def detect_intent(text: str) -> str:
+    text_l = text.lower().strip()
+
+    code_keywords = [
+        "fix", "bug", "error", "exception",
+        "function", "class", "file", "repo",
+        "refactor", "optimize", "review",
+    ]
+    general_patterns = [
+        "what is", "explain", "define", "why", "how",
+    ]
+
+    if any(keyword in text_l for keyword in code_keywords):
+        return "code"
+    if has_tech_context(text_l):
+        return "code"
+    if any(text_l.startswith(pattern) for pattern in general_patterns):
+        return "general"
+    return "general"
+
+
+def detect_intent_confidence(text: str) -> tuple[str, float]:
+    normalized = text.lower().strip()
+    if normalized in {"hi", "hello", "hey"}:
+        return "general", 1.0
+
+    code_patterns = [
+        r"\bfix\b", r"\bbug\b", r"\berror\b", r"\bexception\b",
+        r"\bfunction\b", r"\bclass\b", r"\bfile\b", r"\brepo\b",
+        r"\brefactor\b", r"\boptimize\b", r"\breview\b",
+        r"\bperformance\b", r"\blatency\b", r"\bapi\b", r"\bbackend\b", r"\bdatabase\b",
+        r"```", r"^\s*def\s+\w+\s*\(", r"^\s*class\s+\w+",
+    ]
+    hits = 0
+    for pattern in code_patterns:
+        if re.search(pattern, normalized, flags=re.MULTILINE):
+            hits += 1
+    if hits > 0:
+        return "code", min(0.98, 0.52 + (0.15 * hits))
+    return "general", 0.55
+
+
+def has_strong_code_signal(text: str) -> bool:
+    text_l = text.lower()
+    return any(re.search(rf"\b{re.escape(word)}\b", text_l) for word in STRONG_CODE_HINTS)
+
+
+def has_file_signal(text: str) -> bool:
+    return bool(re.search(r"\b\w+\.(py|js|ts|java|cpp|go)\b", text.lower()))
+
+
+def has_tech_context(text: str) -> bool:
+    lowered = text.lower()
+    return any(word in lowered for word in TECH_HINTS)
+
+
+def build_routing_debug(text: str, auto_intent: str, auto_conf: float, threshold: float) -> dict[str, Any]:
+    normalized = text.lower().strip()
+    return {
+        "input": text,
+        "intent": auto_intent,
+        "confidence": round(float(auto_conf), 3),
+        "threshold": float(threshold),
+        "signals": {
+            "strong_code": has_strong_code_signal(text),
+            "file_signal": has_file_signal(text),
+            "tech_context": has_tech_context(text),
+            "greeting": normalized in {"hi", "hello", "hey"},
+        },
+    }
 
 
 class RuleEngine:
@@ -245,6 +354,12 @@ class RealityAnalyzer:
         }
         self._failure_memory_path = Path("sessions") / "failure_memory.json"
         self._failure_memory = self._load_failure_memory()
+        self._review_cache_disk_path = Path(self.config.review_cache_disk_path)
+        self._load_review_cache_disk()
+        self._graph_adapter = CodeReviewGraphAdapter()
+        self._router_memory = RouterMemory()
+        self._conversation_memory = ConversationMemory(max_turns=5)
+        self._semantic_router = SemanticRouter()
 
     def set_active_agents(self, agents: list[str]) -> list[str]:
         normalized = [item.strip().lower() for item in agents if item.strip()]
@@ -283,6 +398,102 @@ class RealityAnalyzer:
         if mode not in self.MODE_INSTRUCTIONS:
             raise ValueError("Invalid mode. Use one of: debug, optimize, predict")
 
+        normalized = re.sub(r"\s+", " ", cleaned.lower())
+        started = time.perf_counter()
+        configured_mode = str(getattr(self.config, "assistant_mode", "auto") or "auto").lower()
+        if configured_mode not in {"auto", "general", "code"}:
+            configured_mode = "auto"
+
+        route_mode = detect_intent(cleaned) if configured_mode == "auto" else configured_mode
+        rule_intent, rule_conf = detect_intent_confidence(cleaned)
+        semantic_result = self._semantic_router.semantic_intent(cleaned)
+        if semantic_result is not None and semantic_result.confidence > 0.6:
+            auto_intent = semantic_result.intent
+            auto_conf = float(semantic_result.confidence)
+        else:
+            auto_intent = rule_intent
+            auto_conf = rule_conf
+        code_threshold = 0.7
+        routing_debug = build_routing_debug(cleaned, auto_intent, auto_conf, code_threshold)
+        if configured_mode == "auto":
+            if (
+                auto_intent == "code"
+                or has_strong_code_signal(cleaned)
+                or has_file_signal(cleaned)
+                or has_tech_context(cleaned)
+            ) and (
+                auto_conf >= code_threshold
+                or has_strong_code_signal(cleaned)
+                or has_file_signal(cleaned)
+                or has_tech_context(cleaned)
+            ):
+                route_mode = "code"
+            else:
+                route_mode = "general"
+        # Adaptive override from historical routing memory (after normal detection).
+        bias = self._router_memory.get_bias(cleaned)
+        if configured_mode == "auto" and bias in {"code", "general"}:
+            if not (
+                bias == "general"
+                and (has_strong_code_signal(cleaned) or has_file_signal(cleaned) or has_tech_context(cleaned))
+            ):
+                route_mode = bias
+        if normalized in {"hi", "hello", "hey"}:
+            route_mode = "general"
+
+        if self._looks_like_command(normalized):
+            result = {
+                "response_mode": "chat",
+                "chat_response": "Command detected. Use CLI command handling for this action.",
+                "intent": "command",
+                "intent_source": "rule",
+                "intent_confidence": 1.0,
+            }
+            return self._finalize_runtime_fields(result, started, routing_debug)
+
+        if route_mode == "code":
+            try:
+                result = self.analyze_code_multi_agent(cleaned)
+                self._router_memory.record(cleaned, "code")
+                return self._finalize_runtime_fields(result, started, routing_debug)
+            except ValueError:
+                pass
+
+        if route_mode == "general":
+            context = past_context or []
+            cache_key = self._cache_key(cleaned, mode, context)
+            cached_general = self._cache_get(cache_key)
+            if cached_general:
+                return self._finalize_runtime_fields(cached_general, started, routing_debug)
+            if classify_intent(cleaned) == "theory":
+                result = self._handle_theory(cleaned)
+                self._cache_set(cache_key, result)
+                self._router_memory.record(cleaned, "general")
+                return self._finalize_runtime_fields(result, started, routing_debug)
+            general = self._handle_general_qa(cleaned)
+            general["intent"] = "general"
+            general["intent_source"] = "mode"
+            general["intent_confidence"] = 1.0
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            METRICS.observe("latency_ms", float(elapsed_ms))
+            log_event("intent_route", route="general", confidence=auto_conf, latency_ms=elapsed_ms)
+            self._cache_set(cache_key, general)
+            self._router_memory.record(cleaned, "general")
+            return self._finalize_runtime_fields(general, started, routing_debug)
+
+        if classify_intent(cleaned) == "theory":
+            result = self._handle_theory(cleaned)
+            self._router_memory.record(cleaned, "general")
+            return self._finalize_runtime_fields(result, started, routing_debug)
+
+        if is_general_question(cleaned):
+            general = self._handle_general_qa(cleaned)
+            general["intent"] = "general"
+            general["intent_source"] = "rule"
+            general["intent_confidence"] = 0.95
+            self._router_memory.record(cleaned, "general")
+            return self._finalize_runtime_fields(general, started, routing_debug)
+
         intent_data = self.detect_intent_hybrid(cleaned)
         intent = intent_data.get("intent", "chat")
         source = intent_data.get("source", "rule")
@@ -292,31 +503,31 @@ class RealityAnalyzer:
             print(f"[Intent: {intent} | Source: {source} | Confidence: {confidence:.2f}]")
 
         if intent == "command":
-            return {
+            result = {
                 "response_mode": "chat",
                 "chat_response": "Command detected. Use CLI command handling for this action.",
                 "intent": intent,
                 "intent_source": source,
                 "intent_confidence": confidence,
             }
+            return self._finalize_runtime_fields(result, started, routing_debug)
 
         if intent == "greeting":
-            return {
+            result = {
                 "response_mode": "chat",
                 "chat_response": TRX_GREETING,
                 "intent": intent,
                 "intent_source": source,
                 "intent_confidence": confidence,
             }
+            return self._finalize_runtime_fields(result, started, routing_debug)
 
         if intent == "vague":
-            return {
-                "response_mode": "chat",
-                "chat_response": self._clarification_response(),
-                "intent": intent,
-                "intent_source": source,
-                "intent_confidence": confidence,
-            }
+            general = self._handle_general_qa(cleaned)
+            general["intent"] = intent
+            general["intent_source"] = source
+            general["intent_confidence"] = confidence
+            return self._finalize_runtime_fields(general, started, routing_debug)
 
         context = past_context or []
         cache_key = self._cache_key(cleaned, mode, context)
@@ -326,20 +537,71 @@ class RealityAnalyzer:
 
         if intent == "problem":
             result = self._handle_problem(cleaned, mode, context)
+        elif intent in {"theory", "general"}:
+            result = self._handle_general_qa(cleaned)
         else:
             result = self._handle_chat(cleaned)
 
         result["intent"] = intent
         result["intent_source"] = source
         result["intent_confidence"] = confidence
+        self._router_memory.record(cleaned, "code" if intent == "code" else "general")
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        METRICS.observe("latency_ms", float(elapsed_ms))
+        log_event("intent_route", route=intent, confidence=confidence, latency_ms=elapsed_ms)
         self._cache_set(cache_key, result)
+        return self._finalize_runtime_fields(result, started, routing_debug)
+
+    def _finalize_runtime_fields(
+        self,
+        result: dict[str, Any],
+        started: float,
+        routing_debug: dict[str, Any],
+    ) -> dict[str, Any]:
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        result["elapsed_ms"] = elapsed_ms
+        statuses = [str(item).lower() for item in result.get("system_status", []) if str(item).strip()]
+        if any("mcp_query=active" in item for item in statuses):
+            result["mcp_query_status"] = "ACTIVE"
+        elif any("mcp_query=degraded" in item for item in statuses):
+            result["mcp_query_status"] = "DEGRADED"
+        else:
+            result["mcp_query_status"] = "UNKNOWN"
+        result["cache_hit"] = any(item == "cache_hit" for item in statuses)
+        breaker_state = str(METRICS.snapshot().get("states", {}).get("circuit_breaker_state", "CLOSED"))
+        result["circuit_breaker_state"] = breaker_state
+        METRICS.set_state("circuit_breaker_state", breaker_state)
+        METRICS.set_state("mcp_query_status", str(result.get("mcp_query_status", "UNKNOWN")))
+        result["system_health"] = {
+            "mcp_query_status": result.get("mcp_query_status", "UNKNOWN"),
+            "circuit_breaker": breaker_state,
+        }
+        log_event(
+            "response_runtime",
+            mcp_query_status=result.get("mcp_query_status", "UNKNOWN"),
+            circuit_breaker_state=breaker_state,
+            cache_status=("hit" if bool(result.get("cache_hit")) else "miss"),
+            elapsed_ms=elapsed_ms,
+        )
+        result["routing_debug"] = routing_debug
+        if str(result.get("response_mode", "")) == "chat":
+            user_input = str(routing_debug.get("input", "")).strip()
+            response = str(result.get("chat_response", "")).strip()
+            if user_input and response:
+                try:
+                    self._conversation_memory.add(user_input, response)
+                except Exception:
+                    pass
         return result
 
     def detect_intent_hybrid(self, user_input: str) -> dict[str, Any]:
-        """Priority order: command -> greeting -> problem -> vague -> chat."""
+        """Priority order: code -> command -> greeting -> problem -> general."""
         normalized = re.sub(r"\s+", " ", user_input.strip().lower())
         if not normalized:
-            return {"intent": "vague", "confidence": 1.0, "source": "rule"}
+            return {"intent": "general", "confidence": 1.0, "source": "rule"}
+
+        if self._looks_like_code(normalized):
+            return {"intent": "code", "confidence": 0.95, "source": "rule"}
 
         if self._is_command(normalized):
             return {"intent": "command", "confidence": 1.0, "source": "rule"}
@@ -347,22 +609,25 @@ class RealityAnalyzer:
         if self._is_greeting(normalized):
             return {"intent": "greeting", "confidence": 1.0, "source": "rule"}
 
-        # Direct definition/acronym requests should return a normal chat answer,
-        # not a multi-step problem analysis panel.
-        if self._is_definition_query(normalized):
-            return {"intent": "chat", "confidence": 0.95, "source": "rule"}
+        classified = classify_intent(normalized)
+        if classified == "theory":
+            return {"intent": "theory", "confidence": 1.0, "source": "rule"}
+        if classified == "code":
+            return {"intent": "code", "confidence": 0.9, "source": "rule"}
+        if classified == "problem":
+            return {"intent": "problem", "confidence": 0.9, "source": "rule"}
 
         if self._is_strong_problem_signal(normalized):
             return {"intent": "problem", "confidence": 0.85, "source": "rule"}
 
         if self._is_vague(normalized):
-            return {"intent": "vague", "confidence": 0.75, "source": "rule"}
+            return {"intent": "general", "confidence": 0.6, "source": "rule"}
 
         llm_result = self._classify_intent_with_llm(normalized)
         if llm_result is not None:
             return llm_result
 
-        return {"intent": "chat", "confidence": 0.5, "source": "rule"}
+        return {"intent": "general", "confidence": 0.5, "source": "rule"}
 
     def _is_command(self, normalized: str) -> bool:
         if normalized in {"help", "exit", "history"}:
@@ -374,6 +639,26 @@ class RealityAnalyzer:
             or normalized.startswith("mode ")
             or normalized.startswith("save ")
         )
+
+    def _looks_like_command(self, normalized: str) -> bool:
+        return self._is_command(normalized)
+
+    @staticmethod
+    def _looks_like_code(normalized: str) -> bool:
+        if any(re.search(pattern, normalized, flags=re.MULTILINE) for pattern in (
+            r"^\s*def\s+\w+\s*\(",
+            r"^\s*class\s+\w+",
+            r"\bfunction\b",
+            r"\bimport\b",
+            r"#\s*file:",
+            r"```",
+            r"\{",
+            r"\};",
+        )):
+            return True
+        return any(re.search(pattern, normalized) for pattern in (
+            r"\breview\b", r"\bfix\b", r"\bbug\b", r"\bstack\s+trace\b", r"\bexception\b",
+        ))
 
     def _is_greeting(self, normalized: str) -> bool:
         if normalized in self.GREETING_EXACT:
@@ -427,7 +712,7 @@ class RealityAnalyzer:
     def _classify_intent_with_llm(self, user_input: str) -> dict[str, Any] | None:
         prompt = (
             "Classify intent for a CLI assistant.\n"
-            "Allowed labels: greeting, chat, problem, vague, command\n"
+            "Allowed labels: greeting, chat, problem, command, theory, code, general\n"
             "Return valid JSON only:\n"
             "{\"intent\": \"...\", \"confidence\": 0.0}\n"
             f"Input: {user_input}"
@@ -456,7 +741,7 @@ class RealityAnalyzer:
             return None
 
         intent = str(parsed.get("intent", "")).strip().lower()
-        if intent not in {"greeting", "chat", "problem", "vague", "command"}:
+        if intent not in {"greeting", "chat", "problem", "command", "theory", "code", "general"}:
             return None
 
         try:
@@ -485,6 +770,167 @@ class RealityAnalyzer:
             "response_mode": "chat",
             "chat_response": "I am here and ready to help. Share what you need, and we will solve it together.",
         }
+
+    def _handle_theory(self, user_input: str) -> dict[str, Any]:
+        prompt = self._build_theory_prompt(user_input, simple=False)
+        response_text = self.call_llm(prompt)
+        if self._contains_theory_contamination(response_text):
+            # Failsafe: re-run with tighter prompt if analysis/debug text leaks in.
+            response_text = self.call_llm(self._build_theory_prompt(user_input, simple=True))
+
+        cleaned = response_text.strip()
+        if not cleaned:
+            lowered = user_input.lower()
+            kb_answer = next((answer for key, answer in BASIC_KB.items() if key in lowered), "")
+            cleaned = kb_answer or "Definition: A concise definition is currently unavailable."
+        return {
+            "response_mode": "chat",
+            "chat_response": cleaned,
+            "intent": "theory",
+            "intent_source": "rule",
+            "intent_confidence": 1.0,
+            "analysis_source": "llm",
+        }
+
+    def _handle_general_qa(self, query: str) -> dict[str, Any]:
+        q = query.lower().strip()
+
+        # Greeting fast path before any LLM call.
+        if q in {"hi", "hello", "hey"}:
+            return {
+                "response_mode": "chat",
+                "chat_response": "Hey! 👋 I'm TRX. How can I help you today?",
+                "confidence": 1.0,
+                "status": ["general_fastpath"],
+                "analysis_source": "rule-fastpath",
+            }
+
+        if q in {"hi trx", "hey trx", "hello trx", "trx", "trx-ai"}:
+            return {
+                "response_mode": "chat",
+                "chat_response": TRX_GREETING,
+                "confidence": 1.0,
+                "status": ["general_fastpath"],
+                "analysis_source": "rule-fastpath",
+            }
+
+        # Farewell fast path before any LLM call.
+        if q in {"bye", "goodbye", "see you", "exit", "quit"}:
+            return {
+                "response_mode": "chat",
+                "chat_response": "Goodbye! 👋 It was nice talking to you. Come back anytime.",
+                "confidence": 1.0,
+                "status": ["general_fastpath"],
+                "analysis_source": "rule-fastpath",
+            }
+
+        if "what can you do" in q or "what u can do" in q:
+            return {
+                "response_mode": "chat",
+                "chat_response": (
+                    "Hey! 👋 I can help you with:\n\n"
+                    "• Explaining concepts (like data warehouse, networks, etc.)\n"
+                    "• Solving coding problems and debugging\n"
+                    "• Reviewing and improving your code\n"
+                    "• Answering general questions or helping you study\n\n"
+                    "Just tell me what you need 🙂"
+                ),
+                "confidence": 1.0,
+                "status": ["general_fastpath"],
+                "analysis_source": "rule-fastpath",
+            }
+
+        # Short conversational prompts should get a natural assistant nudge.
+        if len(q.split()) <= 2:
+            return {
+                "response_mode": "chat",
+                "chat_response": "Hey! 👋 What would you like to explore today?",
+                "confidence": 0.9,
+                "analysis_source": "rule-fastpath",
+            }
+
+        prompt = f"""
+You are TRX, an intelligent AI assistant.
+
+Answer the user's question directly and naturally.
+
+DO NOT:
+- explain what the user asked
+- describe the question
+- analyze intent
+
+ONLY:
+- give a clear, helpful answer
+
+User: {query}
+Answer:
+"""
+        response_text = self.call_llm(prompt, temperature=max(0.7, self.config.local_llm_temperature))
+        cleaned = self.clean_response(response_text.strip())
+        if not cleaned:
+            lowered = query.lower()
+            kb_answer = next((answer for key, answer in BASIC_KB.items() if key in lowered), "")
+            cleaned = kb_answer or (
+                "I'm here to help! Could you rephrase or add a bit more detail? "
+                "You can ask me about concepts, code, or problems you're working on."
+            )
+        return {
+            "response_mode": "chat",
+            "chat_response": cleaned,
+            "analysis_source": "llm" if response_text.strip() else "rule-fallback",
+        }
+
+    @staticmethod
+    def clean_response(text: str) -> str:
+        bad_patterns = [
+            "the user asked",
+            "this means",
+            "in simple terms the user",
+            "the user is asking",
+        ]
+
+        lowered = text.lower()
+        for pattern in bad_patterns:
+            if pattern in lowered:
+                return "Let me answer that directly: " + text.split(":")[-1].strip()
+        return text
+
+    def call_llm(self, prompt: str, temperature: float | None = None) -> str:
+        local = self._call_local(prompt, temperature=temperature)
+        if local.get("ok"):
+            return self._sanitize_identity(str(local.get("text", ""))).strip()
+        return ""
+
+    @staticmethod
+    def _contains_theory_contamination(response_text: str) -> bool:
+        lowered = response_text.lower()
+        blocked_markers = ("debug", "analysis", "user is referring")
+        return any(marker in lowered for marker in blocked_markers)
+
+    @staticmethod
+    def _build_theory_prompt(user_input: str, *, simple: bool) -> str:
+        if simple:
+            return (
+                "You are a strict technical assistant.\n\n"
+                "Give only a textbook-style definition.\n"
+                "Do not include debugging, analysis, or meta commentary.\n\n"
+                f"Question: {user_input}\n\n"
+                "Format:\n"
+                "Definition:\n"
+                "<clear explanation>"
+            )
+        return (
+            "You are a strict technical assistant.\n\n"
+            "Answer the question with a clear, textbook-style definition.\n"
+            "Do NOT analyze. Do NOT debug.\n\n"
+            "Question:\n"
+            f"{user_input}\n\n"
+            "Format:\n"
+            "Definition:\n"
+            "<clear explanation>\n\n"
+            "Example:\n"
+            "<optional example>"
+        )
 
     def _handle_problem(self, user_input: str, mode: str, context: list[dict[str, Any]]) -> dict[str, Any]:
         fallback = RuleEngine().analyze(user_input, mode, context)
@@ -564,8 +1010,14 @@ class RealityAnalyzer:
 
         return fallback_lines, "rule"
 
-    def _call_local(self, prompt: str, max_new_tokens: int | None = None) -> dict[str, Any]:
+    def _call_local(
+        self,
+        prompt: str,
+        max_new_tokens: int | None = None,
+        temperature: float | None = None,
+    ) -> dict[str, Any]:
         if not self.config.use_local_llm:
+            METRICS.set_state("circuit_breaker_state", "OPEN")
             return {"ok": False, "text": "", "status_code": None}
 
         if self.config.dev_mode:
@@ -577,9 +1029,14 @@ class RealityAnalyzer:
             model=self.config.local_llm_model,
             timeout=self.config.local_llm_timeout_seconds,
             max_new_tokens=(max_new_tokens if max_new_tokens is not None else self.config.local_llm_max_new_tokens),
-            temperature=self.config.local_llm_temperature,
+            temperature=(
+                self.config.local_llm_temperature
+                if temperature is None
+                else max(0.0, min(1.0, float(temperature)))
+            ),
             retries=self.config.local_llm_retries,
         )
+        METRICS.set_state("circuit_breaker_state", "CLOSED" if response.get("ok") else "OPEN")
         if self.config.dev_mode:
             print("[DEBUG] Raw response:")
             self._debug_print_safe(str(response.get("text", ""))[:1200] or "<empty>")
@@ -598,15 +1055,25 @@ class RealityAnalyzer:
             statuses = cached_copy.get("system_status", [])
             if isinstance(statuses, list) and "cache_hit" not in statuses:
                 statuses.append("cache_hit")
+                statuses.extend(self._mcp_status_tags())
                 cached_copy["system_status"] = statuses
             return cached_copy
 
         # Guard against oversized payloads that can degrade model quality.
         code_for_prompt = cleaned_code[: self.REVIEW_PROMPT_MAX_CHARS]
+        graph_context = self._build_graph_context(cleaned_code)
         if self.config.dev_mode or self.config.review_logging:
             print("[Code Review -> Using LLM]")
         started = time.perf_counter()
-        pipeline = self._run_code_review_multi_agent_pipeline(code_for_prompt, language)
+        try:
+            pipeline = self._run_code_review_multi_agent_pipeline(
+                code_for_prompt,
+                language,
+                graph_context=graph_context,
+            )
+        except TypeError:
+            # Backward compatibility for tests/mocks expecting legacy two-arg signature.
+            pipeline = self._run_code_review_multi_agent_pipeline(code_for_prompt, language)
         elapsed = time.perf_counter() - started
         if self.config.dev_mode or self.config.review_logging:
             print(f"[LLM time: {elapsed:.2f}s]")
@@ -614,6 +1081,7 @@ class RealityAnalyzer:
         if not pipeline.get("ok"):
             self._record_failure(cleaned_code, "", "llm_unavailable")
             result = self._build_review_failure_result(cleaned_code, language)
+            self._attach_graph_insights(result, {"graph_context": graph_context})
             self._review_cache_set(review_cache_key, result)
             return result
 
@@ -643,6 +1111,7 @@ class RealityAnalyzer:
             repaired_from_invalid=repaired_from_invalid,
             raw_llm_output=response_text,
         )
+        self._attach_graph_insights(result, pipeline)
         self._review_cache_set(review_cache_key, result)
         return result
 
@@ -653,7 +1122,13 @@ class RealityAnalyzer:
         return {
             "response_mode": "analysis",
             "analysis_text": self._compose_code_review_text(fallback_sections),
-            "system_status": ["intent=review", "source=rule-fallback", "llm_unavailable", "fixed_code_heuristic"],
+            "system_status": [
+                "intent=review",
+                "source=rule-fallback",
+                "llm_unavailable",
+                "fixed_code_heuristic",
+                *self._mcp_status_tags(),
+            ],
             "confidence": round(confidence_score / 100.0, 2),
             "confidence_score": confidence_score,
             "debug_analysis": fallback_sections.get("code_debug", []),
@@ -713,7 +1188,7 @@ class RealityAnalyzer:
     ) -> dict[str, Any]:
         confidence_score = int(sections.get("confidence_score", 70))
         analysis_text = self._compose_code_review_text(sections)
-        status = ["intent=review", "source=llm", "llm_ok"]
+        status = ["intent=review", "source=llm", "llm_ok", *self._mcp_status_tags()]
         if len(cleaned_code) > self.REVIEW_PROMPT_MAX_CHARS:
             status.append("code_truncated_for_review")
         if truncated:
@@ -747,10 +1222,18 @@ class RealityAnalyzer:
             "intent_source": "llm",
         }
 
-    def _run_code_review_multi_agent_pipeline(self, code_for_prompt: str, language: str) -> dict[str, Any]:
+    def _run_code_review_multi_agent_pipeline(
+        self,
+        code_for_prompt: str,
+        language: str,
+        *,
+        graph_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         steps: list[str] = []
         truncated = False
         failure_context = self._failure_context_snippet()
+        graph_context = graph_context or {}
+        graph_context_text = self._graph_context_text(graph_context)
 
         analyzer_prompt = (
             "You are Analyzer Agent.\n"
@@ -758,11 +1241,19 @@ class RealityAnalyzer:
             "Use failure memory to avoid repeated weak outputs.\n"
             "Return plain text.\n\n"
             f"Failure Memory:\n{failure_context}\n\n"
+            f"Graph Context:\n{graph_context_text}\n\n"
             f"{code_for_prompt}"
         )
         analyzer_resp = self._call_local(analyzer_prompt, max_new_tokens=350)
         if not analyzer_resp.get("ok"):
-            return {"ok": False, "text": "", "steps": ["analyzer_failed"], "critic_score": 0.0, "truncated": False}
+            return {
+                "ok": False,
+                "text": "",
+                "steps": ["analyzer_failed"],
+                "critic_score": 0.0,
+                "truncated": False,
+                "graph_context": graph_context,
+            }
         analyzer_notes = str(analyzer_resp.get("text", "")).strip()
         steps.append("analyzer")
 
@@ -773,12 +1264,20 @@ class RealityAnalyzer:
             "FIXED CODE:\nFINAL SUMMARY:\nCONFIDENCE:\n"
             "Be specific.\n\n"
             f"Failure Memory:\n{failure_context}\n\n"
+            f"Graph Context:\n{graph_context_text}\n\n"
             f"Analyzer Notes:\n{analyzer_notes}\n\n"
             f"Code:\n{code_for_prompt}"
         )
         generator_resp = self._call_local(generator_prompt, max_new_tokens=1000)
         if not generator_resp.get("ok"):
-            return {"ok": False, "text": "", "steps": steps + ["generator_failed"], "critic_score": 0.0, "truncated": False}
+            return {
+                "ok": False,
+                "text": "",
+                "steps": steps + ["generator_failed"],
+                "critic_score": 0.0,
+                "truncated": False,
+                "graph_context": graph_context,
+            }
         candidate = str(generator_resp.get("text", "")).strip()
         steps.append("generator")
         if str(generator_resp.get("done_reason", "")).lower() == "length":
@@ -809,6 +1308,9 @@ class RealityAnalyzer:
             steps.append(f"critic_{loop+1}")
             if critic_score >= 0.75:
                 break
+            if loop == 0 and critic_score >= 0.65:
+                # Avoid extra latency for near-pass quality.
+                break
 
             fixer_prompt = (
                 "You are Fixer Agent.\n"
@@ -834,6 +1336,7 @@ class RealityAnalyzer:
             "steps": steps,
             "critic_score": critic_score,
             "truncated": truncated,
+            "graph_context": graph_context,
         }
 
     def _generate_fixed_code_only(self, original_code: str, language: str) -> str:
@@ -1733,6 +2236,99 @@ IMPORTANT:
             "- ..."
         )
 
+    def _build_graph_context(self, code: str) -> dict[str, Any]:
+        files = self._extract_file_hints(code)
+        symbols = self._extract_symbol_hints(code)
+        summary = self._graph_adapter.summarize_context(files=files, symbols=symbols, max_items=5)
+        summary["files"] = files
+        summary["symbols"] = symbols
+        return summary
+
+    @staticmethod
+    def _extract_file_hints(code: str) -> list[str]:
+        matches = re.findall(r"^# FILE:\s*(.+)$", code, flags=re.MULTILINE)
+        files = [item.strip() for item in matches if item.strip()]
+        if files:
+            return files[:8]
+        return []
+
+    @staticmethod
+    def _extract_symbol_hints(code: str) -> list[str]:
+        patterns = [
+            r"^\s*def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+            r"^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+            r"^\s*function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+        ]
+        out: list[str] = []
+        seen: set[str] = set()
+        for pattern in patterns:
+            for name in re.findall(pattern, code, flags=re.MULTILINE):
+                key = str(name).strip()
+                if not key or key in seen:
+                    continue
+                out.append(key)
+                seen.add(key)
+                if len(out) >= 10:
+                    return out
+        return out
+
+    @staticmethod
+    def _graph_context_text(graph_context: dict[str, Any]) -> str:
+        if not graph_context:
+            return "unavailable"
+        lines: list[str] = []
+        for title, key in (
+            ("Dependency Chains", "dependencies"),
+            ("Impacted Modules", "impacted_modules"),
+            ("Call Relationships", "call_relationships"),
+        ):
+            values = graph_context.get(key, [])
+            if isinstance(values, list) and values:
+                lines.append(f"{title}:")
+                for item in values[:8]:
+                    lines.append(f"- {item}")
+        if graph_context.get("degraded"):
+            lines.append("MCP Graph Mode: degraded")
+        else:
+            lines.append("MCP Graph Mode: active")
+        if not lines:
+            return "unavailable"
+        return "\n".join(lines)
+
+    def _attach_graph_insights(self, result: dict[str, Any], pipeline: dict[str, Any]) -> None:
+        graph_context = pipeline.get("graph_context", {})
+        if not isinstance(graph_context, dict):
+            return
+        tags = result.get("system_status", [])
+        if not isinstance(tags, list):
+            tags = []
+        degraded = bool(graph_context.get("degraded"))
+        tags.append("mcp_query=degraded" if degraded else "mcp_query=active")
+        elapsed_ms = int(graph_context.get("elapsed_ms", 0))
+        if elapsed_ms > 0:
+            tags.append(f"mcp_elapsed_ms={elapsed_ms}")
+        result["system_status"] = self._dedupe([str(tag) for tag in tags])
+
+        insights: list[str] = []
+        for key, label in (
+            ("dependencies", "Dependency chain"),
+            ("impacted_modules", "Impacted module"),
+            ("call_relationships", "Call relation"),
+        ):
+            values = graph_context.get(key, [])
+            if isinstance(values, list):
+                for item in values[:3]:
+                    insights.append(f"{label}: {item}")
+        errors = graph_context.get("errors", [])
+        if degraded and isinstance(errors, list) and errors:
+            insights.append(f"MCP degraded: {errors[0]}")
+
+        existing_debug = result.get("debug_analysis", [])
+        if isinstance(existing_debug, list):
+            result["debug_analysis"] = self._dedupe(existing_debug + insights)
+        else:
+            result["debug_analysis"] = insights
+
     def _cache_key(self, user_input: str, mode: str, context: list[dict[str, Any]]) -> str:
         context_slice = context[-self.config.context_window_size:]
         raw = f"{mode}|{user_input.lower().strip()}|{context_slice}"
@@ -1740,15 +2336,40 @@ IMPORTANT:
 
     def _cache_get(self, key: str) -> dict[str, Any] | None:
         if key not in self._response_cache:
+            METRICS.inc("cache_miss")
             return None
         value = self._response_cache.pop(key)
+        created_at = float(value.get("_cache_created_at", 0.0))
+        ttl_seconds = int(value.get("_cache_ttl_seconds", self.config.cache_ttl_seconds))
+        age_seconds = max(0.0, time.time() - created_at) if created_at > 0 else 0.0
+        if created_at > 0 and age_seconds > ttl_seconds:
+            METRICS.inc("cache_miss")
+            return None
         self._response_cache[key] = value
-        return value
+        METRICS.inc("cache_hit")
+        out = copy.deepcopy(value)
+        statuses = out.get("system_status", [])
+        if isinstance(statuses, list):
+            if "cache_hit" not in statuses:
+                statuses.append("cache_hit")
+            out["system_status"] = statuses
+        if self.config.debug_cache:
+            ttl_remaining = max(0, int(ttl_seconds - age_seconds))
+            out["cache_debug"] = {
+                "status": "HIT",
+                "ttl_remaining_s": ttl_remaining,
+                "fingerprint": str(value.get("_cache_fingerprint", key[:12])),
+            }
+        return out
 
     def _cache_set(self, key: str, value: dict[str, Any]) -> None:
         if key in self._response_cache:
             self._response_cache.pop(key)
-        self._response_cache[key] = value
+        store = copy.deepcopy(value)
+        store["_cache_created_at"] = time.time()
+        store["_cache_ttl_seconds"] = int(self.config.cache_ttl_seconds)
+        store["_cache_fingerprint"] = key[:12]
+        self._response_cache[key] = store
         while len(self._response_cache) > self.config.cache_size:
             self._response_cache.popitem(last=False)
 
@@ -1769,3 +2390,106 @@ IMPORTANT:
         self._review_response_cache[key] = copy.deepcopy(value)
         while len(self._review_response_cache) > max(20, self.config.cache_size // 2):
             self._review_response_cache.popitem(last=False)
+        self._save_review_cache_disk()
+
+    @staticmethod
+    def _dedupe(items: list[str]) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for item in items:
+            value = str(item).strip()
+            if not value:
+                continue
+            key = value.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(value)
+        return out
+
+    def _mcp_status_tags(self) -> list[str]:
+        status = detect_mcp_graph_status()
+        tags = [f"mcp_graph={status.state}"]
+        if status.exists and status.size_bytes > 0:
+            tags.append("mcp_graph_available")
+        else:
+            tags.append("mcp_graph_unavailable")
+        return tags
+
+    def _load_review_cache_disk(self) -> None:
+        if not self.config.review_cache_disk_enabled:
+            return
+        try:
+            if not self._review_cache_disk_path.exists():
+                return
+            payload = json.loads(self._review_cache_disk_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return
+            items = payload.get("items", [])
+            if not isinstance(items, list):
+                return
+            for item in items[-max(20, self.config.cache_size // 2):]:
+                if not isinstance(item, dict):
+                    continue
+                key = str(item.get("key", "")).strip()
+                value = item.get("value")
+                if key and isinstance(value, dict):
+                    self._review_response_cache[key] = value
+        except (OSError, ValueError, TypeError):
+            return
+
+    def _save_review_cache_disk(self) -> None:
+        if not self.config.review_cache_disk_enabled:
+            return
+        try:
+            self._review_cache_disk_path.parent.mkdir(parents=True, exist_ok=True)
+            max_entries = max(20, self.config.review_cache_disk_max_entries)
+            items = [
+                {"key": key, "value": value}
+                for key, value in list(self._review_response_cache.items())[-max_entries:]
+            ]
+            payload = {"version": 1, "items": items}
+            self._review_cache_disk_path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except OSError:
+            return
+
+    def clear_caches(self) -> None:
+        self._response_cache.clear()
+        self._review_response_cache.clear()
+        if self.config.review_cache_disk_enabled and self._review_cache_disk_path.exists():
+            try:
+                self._review_cache_disk_path.unlink()
+            except OSError:
+                pass
+        if hasattr(self, "_graph_adapter") and self._graph_adapter is not None:
+            try:
+                self._graph_adapter.clear_cache()
+            except Exception:
+                pass
+
+    def runtime_status(self) -> dict[str, Any]:
+        graph = detect_mcp_graph_status()
+        transport = "LOCAL"
+        try:
+            transport = self._graph_adapter.transport_label()
+        except Exception:
+            pass
+        breaker_state = str(METRICS.snapshot().get("states", {}).get("circuit_breaker_state", "CLOSED"))
+        return {
+            "assistant_mode": str(getattr(self.config, "assistant_mode", "auto")).upper(),
+            "graph_transport": transport,
+            "mcp_active": graph.exists and graph.state == "ready",
+            "cache_enabled": bool(self.config.review_cache_disk_enabled),
+            "llm_connected": bool(self.config.use_local_llm),
+            "cache_ttl_seconds": int(self.config.cache_ttl_seconds),
+            "circuit_breaker_state": breaker_state,
+        }
+
+    def apply_feedback(self, text: str, correct_route: str) -> None:
+        normalized_route = str(correct_route).strip().lower()
+        if normalized_route not in {"code", "general"}:
+            raise ValueError("correct_route must be 'code' or 'general'")
+        self._router_memory.record(str(text), normalized_route)
