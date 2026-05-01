@@ -10,6 +10,13 @@ dsa_test_fixed.py
 # Session/runtime outputs
 sessions/
 *.log
+/.code-review-graph
+*.tmp
+*.bak
+*.swp
+.coverage
+coverage.xml
+htmlcov/
 
 # Python cache/build
 __pycache__/
