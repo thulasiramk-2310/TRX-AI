@@ -11,7 +11,7 @@ warnings.simplefilter("ignore", DeprecationWarning)
 from rich.console import Console
 
 import main
-from analyzer import RealityAnalyzer
+from analyzer import RealityAnalyzer, classify_intent
 from config import AppConfig
 from formatter import OutputFormatter
 from history import SessionHistory
@@ -26,6 +26,48 @@ class AnalyzerTests(unittest.TestCase):
         result = self.analyzer.detect_intent_hybrid("hi")
         self.assertEqual(result.get("intent"), "greeting")
         self.assertEqual(result.get("source"), "rule")
+
+    def test_classify_intent_theory(self) -> None:
+        self.assertEqual(classify_intent("What is Data Warehousing?"), "theory")
+
+    def test_general_qa_farewell_fastpath(self) -> None:
+        result = self.analyzer._handle_general_qa("bye")
+        self.assertEqual(result.get("response_mode"), "chat")
+        self.assertIn("Goodbye!", str(result.get("chat_response", "")))
+        self.assertEqual(float(result.get("confidence", 0.0)), 1.0)
+
+    def test_theory_intent_routes_to_plain_definition(self) -> None:
+        with patch.object(
+            self.analyzer,
+            "_call_local",
+            return_value={"ok": True, "text": "Definition:\nData Warehousing is centralized analytical data storage."},
+        ) as mock_llm, patch.object(
+            self.analyzer,
+            "analyze_code_multi_agent",
+            side_effect=AssertionError("code route should not execute"),
+        ), patch.object(
+            self.analyzer,
+            "_handle_problem",
+            side_effect=AssertionError("problem route should not execute"),
+        ):
+            result = self.analyzer.analyze("What is Data Warehousing?", mode="debug", past_context=[])
+
+        self.assertEqual(result.get("intent"), "theory")
+        self.assertEqual(result.get("response_mode"), "chat")
+        self.assertIn("Definition:", str(result.get("chat_response", "")))
+        self.assertEqual(mock_llm.call_count, 1)
+
+    def test_theory_failsafe_reruns_when_contaminated(self) -> None:
+        responses = [
+            {"ok": True, "text": "DEBUG ANALYSIS: user is referring to architecture analysis."},
+            {"ok": True, "text": "Definition:\nData Warehousing is collecting and storing data from multiple sources for analysis and reporting."},
+        ]
+        with patch.object(self.analyzer, "_call_local", side_effect=responses) as mock_llm:
+            result = self.analyzer.analyze("What is Data Warehousing?", mode="debug", past_context=[])
+
+        self.assertEqual(result.get("intent"), "theory")
+        self.assertIn("Definition:", str(result.get("chat_response", "")))
+        self.assertEqual(mock_llm.call_count, 2)
 
     def test_parse_code_review_sections_markdown_headers(self) -> None:
         text = """### CODE DEBUG:
@@ -163,6 +205,58 @@ def ignored():
         )
         self.assertFalse(analyzer._passes_python_optimization_gate(original, still_recursive))
 
+    def test_ambiguous_technical_prompts_route_to_code_path(self) -> None:
+        analyzer = RealityAnalyzer(AppConfig.from_env())
+        with patch.object(
+            analyzer,
+            "analyze_code_multi_agent",
+            return_value={
+                "response_mode": "analysis",
+                "analysis_text": "ok",
+                "system_status": ["intent=review", "source=rule"],
+                "confidence": 0.8,
+            },
+        ) as mock_code:
+            for prompt in ("optimize system performance", "make login faster", "improve API performance"):
+                result = analyzer.analyze(prompt, mode="debug", past_context=[])
+                self.assertEqual(result.get("response_mode"), "analysis")
+            self.assertEqual(mock_code.call_count, 3)
+
+    def test_circuit_breaker_state_is_exposed_in_outputs_and_status(self) -> None:
+        analyzer = RealityAnalyzer(AppConfig.from_env())
+        with patch.object(
+            analyzer,
+            "_call_local",
+            return_value={"ok": False, "text": "", "status_code": None},
+        ):
+            result = analyzer.analyze("what is a network", mode="debug", past_context=[])
+        self.assertIn("circuit_breaker_state", result)
+        self.assertIn("system_health", result)
+        self.assertIn("circuit_breaker", result.get("system_health", {}))
+        status = analyzer.runtime_status()
+        self.assertIn("circuit_breaker_state", status)
+
+    def test_cache_ttl_hit_stale_refresh(self) -> None:
+        cfg = AppConfig.from_env()
+        cfg.use_local_llm = False
+        cfg.debug_cache = True
+        cfg.cache_ttl_seconds = 2
+        analyzer = RealityAnalyzer(cfg)
+        analyzer.clear_caches()
+        key = "ttl-test"
+        analyzer._cache_set(key, {"response_mode": "chat", "chat_response": "ok", "system_status": []})
+        analyzer._response_cache[key]["_cache_created_at"] = 100.0
+        analyzer._response_cache[key]["_cache_ttl_seconds"] = 2
+
+        with patch("analyzer.time.time", return_value=101.0):
+            second = analyzer._cache_get(key)
+        self.assertIsNotNone(second)
+        self.assertIn("cache_debug", second or {})
+
+        with patch("analyzer.time.time", return_value=103.5):
+            third = analyzer._cache_get(key)
+        self.assertIsNone(third)
+
 
 class SemanticScoreTests(unittest.TestCase):
     def test_semantic_match_synonym(self) -> None:
@@ -274,6 +368,7 @@ class HistoryExportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 
