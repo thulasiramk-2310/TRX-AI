@@ -31,15 +31,32 @@ Why:
 When local LLM fails or truncates output, TRX-AI applies:
 
 - retries with backoff
+- bounded timeouts to fail fast and return fallback output sooner
 - deterministic section fallbacks
 - heuristic fixed-code generation
 - AST validation and repair loops
+- MCP graph availability detection with graceful degradation
 
 Why:
 
 - avoid command-level hard failures
 - keep `review` and `fix` operational under degraded conditions
 - improve trust in CLI workflows
+
+## 5. Latency and Throughput Controls
+
+TRX-AI uses explicit guardrails for performance:
+
+- review target character cap for folder reviews
+- excluded directory set for recursive scans (`node_modules`, `.git`, `venv`, etc.)
+- in-memory LRU caches for analysis and review paths
+- optional disk-backed review cache to avoid repeated cold LLM calls
+
+Why:
+
+- lower startup and first-review latency
+- avoid expensive scanning in large repositories
+- reduce duplicate model token usage
 
 ## 4. Structured Output Contract
 
