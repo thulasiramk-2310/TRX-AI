@@ -1,57 +1,116 @@
-# TRX-AI - Multi-Agent Code Intelligence System
+# TRX-AI
 
-TRX-AI is a CLI-first AI assistant for structured debugging, code review, and auto-fix workflows using a local LLM.
+**Think. Reason. Execute.**
 
-## Overview
+TRX-AI is a CLI-first, hybrid AI assistant for structured debugging, code review, and safe auto-fix workflows using local LLMs and resilient fallbacks.
 
-TRX-AI is designed for practical engineering loops in terminal environments:
+Built for real engineering loops: fast intent routing, multi-agent review, structured output, observability, and deterministic runtime behavior.
 
-- Hybrid intent detection (rule priority + LLM fallback)
-- Multi-agent reasoning (Debug, Improve, Predict, Review)
-- Structured review output (`DEBUG`, `IMPROVEMENTS`, `PERFORMANCE`, `FIX`, `SUMMARY`, `CONFIDENCE`)
-- Auto-fix generation to safe output files (`<name>_fixed.py`)
-- Session history and TXT/PDF export
+---
+
+## Why TRX
+
+- `Hybrid intelligence`: Rule-first + semantic routing + feedback learning.
+- `Engineering-first UX`: Built for terminal-native developer workflows.
+- `Reliable by default`: Fallbacks, retries, cache TTL, and runtime status signals.
+- `Actionable outputs`: Structured review sections, not vague chat blobs.
+- `Showcase-ready`: Clean architecture, measurable behavior, and testable components.
+
+---
+
+## Feature Highlights
+
+- ⚡ **Hybrid Intent Routing**: Route requests to general or code workflows with confidence signals.
+- 🧠 **Multi-Agent Code Pipeline**: Analyzer, Generator, Critic, and Fixer stages.
+- 🛡️ **Fallback Safety**: Graceful behavior when LLM or graph context is degraded.
+- 📈 **Observability**: Structured logs, latency metrics, cache hit/miss, breaker state.
+- 🗂️ **Session & Export Tools**: History, save/export, comparison reports.
+- 🧪 **Smoke + Unit Testing**: `main.py test`, `smoke_e2e.py`, and CI-friendly assertions.
+
+---
+
+## How It Works
+
+TRX receives user input, classifies intent, chooses the best execution path, then returns either conversational output or structured analysis with metadata.
+
+1. Detect intent with rule + semantic signals.
+2. Route to general assistant flow or code analysis flow.
+3. Apply cache, fallback, and observability instrumentation.
+4. Return output with runtime metadata (`mcp_query_status`, `circuit_breaker_state`, `cache_hit`).
+
+---
 
 ## Architecture
 
-Pipeline:
-
-`User Input -> Intent Detection -> Agent Orchestrator -> Local LLM -> Structured Output -> CLI/Reports`
+### System Architecture Flow
 
 ```mermaid
 flowchart LR
-    A[User Input] --> B[Hybrid Intent Detection]
-    B --> C{Route}
-    C -->|chat| D[Conversation Handler]
-    C -->|review/fix/watch| E[Code Review Pipeline]
-    E --> F[Analyzer Agent]
-    E --> G[Generator Agent]
-    E --> H[Critic Agent]
-    E --> I[Fixer Agent]
-    D --> J[Local LLM]
-    F --> J
-    G --> J
-    H --> J
-    I --> J
-    J --> K[Structured Formatter]
-    K --> L[CLI Output]
-    K --> M[TXT/PDF Export]
-    K --> N[Session History]
+    U[User Input] --> R[Hybrid Router]
+    R -->|General| G[General Assistant Flow]
+    R -->|Code| C[Code Analysis Flow]
+    G --> O[Unified Output Formatter]
+    C --> O
+    O --> CLI[CLI / Reports / History]
+    O --> OBS[Metrics + Structured Logs]
 ```
 
-Detailed docs:
+### Intent Routing Pipeline
 
-- [docs/architecture.md](docs/architecture.md)
-- [docs/design.md](docs/design.md)
-- [docs/evaluation.md](docs/evaluation.md)
+```mermaid
+flowchart TD
+    A[Input Text] --> B[Rule Signals]
+    A --> C[Semantic Signals]
+    B --> D[Confidence Merge]
+    C --> D
+    D --> E{Route Decision}
+    E -->|General| F[General QA Handler]
+    E -->|Code| G[Multi-Agent Review]
+    D --> H[Router Feedback Memory]
+    H --> E
+```
 
-## Demo
+### Multi-Agent Pipeline
+
+```mermaid
+flowchart LR
+    I[Code / Prompt] --> AN[Analyzer]
+    AN --> GE[Generator]
+    GE --> CR[Critic]
+    CR -->|Score OK| FX[Fixer/Finalize]
+    CR -->|Needs revision| GE
+    FX --> OUT[Structured Review Output]
+```
+
+---
+
+## CLI Demo
 
 ```bash
+# Start TRX
+python main.py
+
+# Ask general questions
+trx-ai > hi
+trx-ai > what is data warehouse
+
+# Review code
 trx-ai > review dsa_test.py
+
+# Generate fixed code
 trx-ai > fix dsa_test.py
-python evaluation.py
+
+# Show runtime status
+trx-ai > status
+
+# Run built-in smoke summary
+python main.py test
+
+# Run machine-readable end-to-end smoke report
+python smoke_e2e.py --disable-llm
 ```
+
+---
 
 ## Commands
 
@@ -64,60 +123,66 @@ python evaluation.py
 - `mode debug|optimize|predict` - Set fallback profile
 - `review <code_file | folder_path>` - Run multi-agent code review
 - `fix <code_file>` - Generate fixed code and ask before saving
-- `watch <folder>` - Auto-review changed code files (`.py/.js/.ts/.java/.c/.cpp/.cs/.go/.rs/.swift/.kt/.php/.sql/.rb`)
+- `watch <folder>` - Auto-review changed code files
+- `python main.py test` - Run TRX smoke test summary
+- `python smoke_e2e.py --disable-llm` - Emit JSON pass/fail matrix report
 - `exit | quit` - Close CLI
 
-## Output Format
+---
 
-TRX-AI returns structured sections for analysis responses:
+## Clean Output Example
 
-- `DEBUG`
-- `IMPROVEMENTS`
-- `PERFORMANCE`
-- `FIX`
-- `SUMMARY`
-- `CONFIDENCE`
+```text
+[TRX RESPONSE]
 
-System metadata is also shown (`intent`, `source`, and status tags).
+💬 Response:
+Here’s the root cause: the login check does not validate empty tokens.
 
-## Multi-Agent Roles
+Insight:
+Add a guard clause before parsing and return a typed auth error.
 
-- Analyzer Agent: identifies core bugs and edge cases
-- Generator Agent: proposes code-level improvements
-- Critic Agent: validates quality and catches weak outputs
-- Fixer Agent: produces final corrected code (safe write to `_fixed` file)
+Confidence: High
+Runtime:
+- intent: code
+- mcp_query_status: ACTIVE
+- circuit_breaker_state: CLOSED
+- cache_hit: false
+```
 
-## Reliability
+---
 
-- Rule-first intent routing with LLM fallback
+## Reliability & Observability
+
+- Rule-first routing with semantic enhancement
 - Retry/backoff for local LLM calls
-- Truncation handling for long model outputs
-- Fallback analysis when model is unavailable
-- Safe fix flow with preview + confirmation
-- Semantic scoring for evaluation quality checks (`semantic_scoring.py`)
+- Deterministic in-memory cache TTL
+- Structured runtime events (`intent_route`, `response_runtime`)
+- First-class breaker and MCP status in outputs
+- Graceful degraded-mode fallbacks
 
-## Recent Improvements
+---
 
-- Upgraded benchmark scoring from basic keyword/fuzzy matching to weighted semantic scoring.
-- Refactored review orchestration in `analyzer.py` into smaller maintainable helper flows.
-- Reduced PDF export duplication in `history.py` with shared setup/theme helpers.
-- Expanded automated test coverage to 13 unit/smoke tests.
+## Evaluation & Testing
 
-## Evaluation
-
-Evaluation is available in `evaluation.py` with benchmark-style metrics:
-
-- Accuracy
-- Fix Quality
-- Avg Response Time
-- Completeness
-- Baseline comparison
-
-Run:
+- Unit and smoke tests:
 
 ```bash
-python evaluation.py
+python -m pytest -q tests/test_trx_ai.py
+python main.py test
+python smoke_e2e.py --disable-llm --json-out sessions/smoke_e2e_report.json
 ```
+
+- JSON smoke report includes:
+- overall score out of 10
+- category summaries
+- pass/fail matrix per check
+
+See:
+- [docs/evaluation.md](docs/evaluation.md)
+- [docs/architecture.md](docs/architecture.md)
+- [docs/design.md](docs/design.md)
+
+---
 
 ## Setup
 
@@ -136,33 +201,20 @@ LOCAL_LLM_MODEL=qwen3:8b
 HF_REQUEST_TIMEOUT=120
 HF_MAX_NEW_TOKENS=600
 HF_TEMPERATURE=0.3
+RD_ASSISTANT_MODE=auto
+RD_CACHE_SIZE=120
+RD_CACHE_TTL_SECONDS=300
+RD_DEBUG_CACHE=false
 RD_REVIEW_LOGS=false
 ```
 
-3. Start:
+3. Run:
 
 ```bash
 python main.py
 ```
 
-## Quick Workflows
-
-```bash
-# Chat
-trx-ai > hi
-
-# Review a single file
-trx-ai > review main.py
-
-# Generate fixed code with preview
-trx-ai > fix dsa_test.py
-
-# Export latest run
-trx-ai > export report.pdf
-
-# Compare latest two analyses
-trx-ai > export compare comparison_report.pdf
-```
+---
 
 ## Project Structure
 
@@ -176,6 +228,7 @@ chatcli/
 |-- config.py
 |-- evaluation.py
 |-- semantic_scoring.py
+|-- smoke_e2e.py
 |-- tests/
 |-- docs/
 |-- assets/
@@ -183,6 +236,9 @@ chatcli/
 |-- LICENSE
 ```
 
+---
+
 ## License
 
 MIT - see [LICENSE](LICENSE).
+
