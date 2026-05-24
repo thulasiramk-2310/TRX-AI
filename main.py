@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+import sys
 import textwrap
 import time
 from datetime import datetime
@@ -24,6 +25,9 @@ from formatter import OutputFormatter
 from history import SessionHistory
 from mcp_graph import detect_mcp_graph_status
 from observability import METRICS
+from personality import add_personality, delete_personality, list_personality_names, normalize_personality
+from long_term_memory import LongTermMemory
+from user_profiles import UserProfiles
 try:
     from watcher import start_watcher
 except Exception:  # pragma: no cover - optional runtime dependency
@@ -47,11 +51,11 @@ SUPPORTED_CODE_SUFFIXES = {
 }
 
 
-def _build_cli_prompt(console: Console, mode: str) -> str:
-    mode_label = mode.upper()
+def _build_cli_prompt(console: Console, personality: str) -> str:
+    mode_label = personality.upper()
 
     if not console.color_system:
-        return f"trx[{mode}] >"
+        return f"trx[{personality}] >"
     return f"[bold #0f172a on #86efac] trx[{mode_label.lower()}] [/][bold #22c55e] >[/]"
 
 
@@ -115,8 +119,21 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
         ui_transition_delay=config.ui_transition_delay_seconds,
     )
     history = SessionHistory()
+    ltm = LongTermMemory()
+    profiles = UserProfiles()
 
     mode = str(config.assistant_mode or "auto").lower()
+    personality = normalize_personality(getattr(config, "personality", "friendly"))
+    current_user = str(ltm.get("current_user", "") or "").strip().lower()
+    if current_user:
+        profile = profiles.get_user(current_user)
+        personality = normalize_personality(str(profile.get("personality", personality)))
+    else:
+        personality = normalize_personality(str(ltm.get("favorite_personality", personality)))
+    if hasattr(analyzer, "set_personality"):
+        analyzer.set_personality(personality)
+    if hasattr(analyzer, "set_current_user"):
+        analyzer.set_current_user(current_user or "guest")
     analysis_profile = "debug"
     total_analyses = 0
     active_watchers: list[Any] = []
@@ -129,7 +146,7 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
 
     while True:
         try:
-            user_input = prompt(_build_cli_prompt(console, mode)).strip()
+            user_input = prompt(_build_cli_prompt(console, personality)).strip()
         except (KeyboardInterrupt, EOFError):
             _shutdown_watchers(active_watchers)
             console.print("\nExiting TRX. Goodbye!", style="cyan")
@@ -154,6 +171,132 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
             console.print(f"Mode switched: {mode.upper()}", style="cyan")
             continue
 
+        if command == "personality":
+            _print_error(console, "Use: personality list | personality set <name> | personality add <name> <instruction> | personality delete <name>")
+            continue
+        if command.startswith("personality "):
+            sub = command_parts[1].lower() if len(command_parts) > 1 else ""
+            if sub == "list":
+                names = list_personality_names()
+                console.print("Personalities: " + ", ".join(names), style="cyan")
+                continue
+            if sub == "set":
+                if len(command_parts) < 3:
+                    _print_error(console, "Use: personality set <name>")
+                    continue
+                raw_target = command_parts[2].strip().lower()
+                names = set(list_personality_names())
+                if raw_target not in names:
+                    _print_error(console, "Personality not found. Use: personality list")
+                    continue
+                target = normalize_personality(raw_target)
+                personality = analyzer.set_personality(target) if hasattr(analyzer, "set_personality") else target
+                config.personality = personality
+                ltm.store("favorite_personality", personality)
+                if current_user:
+                    profile = profiles.get_user(current_user)
+                    profile["personality"] = personality
+                    profiles.set_user(current_user, profile)
+                    ltm.store_user_value(current_user, "favorite_personality", personality)
+                console.print(f"[OK] Personality set to {personality}", style="green")
+                continue
+            if sub == "add":
+                if len(command_parts) < 4:
+                    _print_error(console, "Use: personality add <name> <instruction>")
+                    continue
+                name = command_parts[2].strip().lower()
+                instruction = user_input.split(None, 3)[3].strip()
+                try:
+                    created = add_personality(name, instruction)
+                    console.print(f"[OK] Personality added: {created}", style="green")
+                except ValueError as exc:
+                    _print_error(console, str(exc))
+                continue
+            if sub == "delete":
+                if len(command_parts) < 3:
+                    _print_error(console, "Use: personality delete <name>")
+                    continue
+                name = command_parts[2].strip().lower()
+                try:
+                    delete_personality(name)
+                    if personality == name:
+                        personality = "friendly"
+                        if hasattr(analyzer, "set_personality"):
+                            analyzer.set_personality(personality)
+                    console.print(f"[OK] Personality deleted: {name}", style="green")
+                except ValueError as exc:
+                    _print_error(console, str(exc))
+                continue
+
+            # Backward-compatible shorthand: personality <name>
+            raw_target = command_parts[1].strip().lower()
+            names = set(list_personality_names())
+            if raw_target in names:
+                target = normalize_personality(raw_target)
+                personality = analyzer.set_personality(target) if hasattr(analyzer, "set_personality") else target
+                config.personality = personality
+                ltm.store("favorite_personality", personality)
+                if current_user:
+                    profile = profiles.get_user(current_user)
+                    profile["personality"] = personality
+                    profiles.set_user(current_user, profile)
+                    ltm.store_user_value(current_user, "favorite_personality", personality)
+                console.print(f"[OK] Personality set to {personality}", style="green")
+                continue
+            _print_error(console, "Unknown personality command. Use: personality list | set | add | delete")
+            continue
+
+        if command == "user":
+            _print_error(console, "Use: user list | user create <name> | user login <name>")
+            continue
+        if command.startswith("user "):
+            sub = command_parts[1].lower() if len(command_parts) > 1 else ""
+            if sub == "list":
+                names = profiles.list_users()
+                if not names:
+                    console.print("No users found.", style="yellow")
+                else:
+                    console.print("Users: " + ", ".join(names), style="cyan")
+                continue
+            if sub == "create":
+                if len(command_parts) < 3:
+                    _print_error(console, "Use: user create <name>")
+                    continue
+                username = command_parts[2].strip().lower()
+                try:
+                    created = profiles.create_user(username, personality=personality)
+                    console.print(f"[OK] User created: {username} (personality={created.get('personality','friendly')})", style="green")
+                except ValueError as exc:
+                    _print_error(console, str(exc))
+                continue
+            if sub == "login":
+                if len(command_parts) < 3:
+                    _print_error(console, "Use: user login <name>")
+                    continue
+                username = command_parts[2].strip().lower()
+                profile = profiles.get_user(username)
+                if not profile:
+                    _print_error(console, "User not found. Create with: user create <name>")
+                    continue
+                current_user = username
+                ltm.store("current_user", current_user)
+                if hasattr(analyzer, "set_current_user"):
+                    analyzer.set_current_user(current_user)
+                preferred = normalize_personality(
+                    str(profile.get("personality", ltm.get_user_value(current_user, "favorite_personality", personality)))
+                )
+                personality = preferred
+                config.personality = personality
+                if hasattr(analyzer, "set_personality"):
+                    analyzer.set_personality(personality)
+                encoding = (getattr(getattr(console, "file", None), "encoding", None) or "").lower()
+                wave = " 👋" if "utf" in encoding else ""
+                console.print(f"Welcome back {username}{wave}", style="green")
+                console.print(f"Personality: {personality}", style="cyan")
+                continue
+            _print_error(console, "Unknown user command. Use: user list | user create <name> | user login <name>")
+            continue
+
         if command == "status":
             status = analyzer.runtime_status()
             snap = METRICS.snapshot()
@@ -167,6 +310,8 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
             avg_latency = int(float(averages.get("latency_ms", 0.0)))
             console.print("\nTRX STATUS", style="bold cyan")
             console.print(f"Mode: {mode.upper()}")
+            console.print(f"User: {(current_user or 'guest').upper()}")
+            console.print(f"Personality: {personality.upper()}")
             console.print(f"Graph Transport: {status.get('graph_transport', 'LOCAL')}")
             console.print(f"MCP: {'ACTIVE' if status.get('mcp_active') else 'DEGRADED'}")
             console.print(f"Breaker: {status.get('circuit_breaker_state', states.get('circuit_breaker_state', 'CLOSED'))}")
@@ -1013,6 +1158,8 @@ def _print_help(console: Console) -> None:
     console.print("explain \"<question>\" - Ask a general question")
     console.print("history | save | export | watch | agents")
     console.print("mode debug|optimize|predict - Fallback profile")
+    console.print("personality list|set|add|delete - Manage conversation personalities")
+    console.print("user list|create|login - Manage multi-user profiles")
     console.print("exit | quit - Close TRX")
 
 
@@ -1050,13 +1197,19 @@ def _print_startup_warnings(console: Console, config: AppConfig) -> None:
         console.print(wrapped, style="yellow")
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="TRX CLI")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="trx", description="TRX CLI")
     subparsers = parser.add_subparsers(dest="command")
 
     p_benchmark = subparsers.add_parser("benchmark", help="Run benchmark mode")
     p_benchmark.add_argument("--runs", type=int, default=20)
     p_benchmark.add_argument("--debug", action="store_true")
+
+    subparsers.add_parser(
+        "eval",
+        help="Run the labelled code-review evaluation (see `trx eval --help`)",
+        add_help=False,
+    )
 
     p_history = subparsers.add_parser("history", help="Show persisted run history")
     p_history.add_argument("--limit", type=int, default=20)
@@ -1070,8 +1223,17 @@ if __name__ == "__main__":
 
     p_test = subparsers.add_parser("test", help="Run TRX smoke test suite")
     p_test.add_argument("--debug", action="store_true")
+    return parser
 
-    args = parser.parse_args()
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "eval":
+        from evaluation import main as eval_main
+
+        return eval_main(argv[1:])
+
+    args = build_parser().parse_args(argv)
     if args.command == "benchmark":
         run_benchmark_mode(runs=args.runs, debug=args.debug)
     elif args.command == "history":
@@ -1085,5 +1247,8 @@ if __name__ == "__main__":
         run_test_mode(debug=args.debug)
     else:
         run_cli()
+    return 0
 
 
+if __name__ == "__main__":
+    raise SystemExit(main())

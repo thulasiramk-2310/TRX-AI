@@ -1,0 +1,84 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trx-ai"
+version = "0.2.0"
+description = "CLI-first hybrid AI assistant for structured debugging, code review, and safe auto-fix."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.32.0",
+    "rich>=13.7.0",
+    "reportlab>=4.0.0",
+    "numpy>=1.26",
+    "watchdog>=4.0",
+]
+
+[project.optional-dependencies]
+# Embedding-based routing and vector memory (heavy; falls back to lexical matching without it).
+semantic = ["sentence-transformers>=2.7", "faiss-cpu>=1.8"]
+# Optional Supabase sync for long-term memory.
+cloud = ["supabase>=2.0"]
+dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.6"]
+
+[project.scripts]
+trx = "main:main"
+
+[tool.setuptools]
+# Flat module layout. The app reads sessions/, .env and benchmarks/ relative to the
+# working directory, so use an editable install (`pip install -e .`) from the repo root.
+py-modules = [
+    "analyzer",
+    "cloud_memory_sync",
+    "config",
+    "conversation_memory",
+    "evaluation",
+    "formatter",
+    "graph_query_adapter",
+    "history",
+    "intent_rules",
+    "llm_client",
+    "long_term_memory",
+    "main",
+    "mcp_graph",
+    "observability",
+    "personality",
+    "router_memory",
+    "rule_engine",
+    "semantic_router",
+    "semantic_scoring",
+    "smoke_e2e",
+    "smoke_questions",
+    "user_profiles",
+    "vector_memory",
+    "watcher",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.coverage.run]
+source = ["."]
+omit = ["tests/*", "venv/*", ".venv/*", "build/*", "dist/*", "examples/*", "*_fixed.py"]
+
+[tool.coverage.report]
+skip_empty = true
+show_missing = false
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = ["venv", "build", "dist", "examples", "*_fixed.py"]
+
+[tool.ruff.lint]
+# Correctness-focused set: syntax errors, pyflakes, and bugbear.
+select = ["E9", "F", "B"]
+ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+# CLI loop passes lambdas to _run_with_prompt_loader, which calls them synchronously.
+"main.py" = ["B023"]

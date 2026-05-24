@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import io
+import tempfile
 import warnings
 import unittest
 from pathlib import Path
@@ -12,10 +13,15 @@ from rich.console import Console
 
 import main
 from analyzer import RealityAnalyzer, classify_intent
+from conversation_memory import ConversationMemory
 from config import AppConfig
 from formatter import OutputFormatter
 from history import SessionHistory
+from long_term_memory import LongTermMemory
+import personality as personality_module
 from semantic_scoring import SemanticMatcher
+from user_profiles import UserProfiles
+from vector_memory import VectorMemory
 from watcher import CodeChangeHandler
 
 class AnalyzerTests(unittest.TestCase):
@@ -35,6 +41,11 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(result.get("response_mode"), "chat")
         self.assertIn("Goodbye!", str(result.get("chat_response", "")))
         self.assertEqual(float(result.get("confidence", 0.0)), 1.0)
+
+    def test_personality_mode_prefix_changes_chat_style(self) -> None:
+        self.analyzer.set_personality("mentor")
+        result = self.analyzer._handle_general_qa("hi")
+        self.assertTrue(str(result.get("chat_response", "")).startswith("🎓"))
 
     def test_theory_intent_routes_to_plain_definition(self) -> None:
         with patch.object(
@@ -268,6 +279,72 @@ class SemanticScoreTests(unittest.TestCase):
         matcher = SemanticMatcher()
         score = matcher.score("sql injection risk", "There is a SQL injection risk due to string concatenation.")
         self.assertGreaterEqual(score, 0.95)
+
+
+class PersonalitySystemTests(unittest.TestCase):
+    def test_custom_personality_add_list_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            custom_path = Path(tmp) / "personalities.json"
+            with patch.object(personality_module, "PERSONALITIES_PATH", custom_path):
+                created = personality_module.add_personality(
+                    "interviewer",
+                    "Act like a technical interviewer. Ask follow-up questions.",
+                    prefix="✨",
+                )
+                self.assertEqual(created, "interviewer")
+                names = personality_module.list_personality_names()
+                self.assertIn("interviewer", names)
+                meta = personality_module.personality_meta("interviewer")
+                self.assertEqual(meta.get("prefix"), "✨")
+                personality_module.delete_personality("interviewer")
+                names = personality_module.list_personality_names()
+                self.assertNotIn("interviewer", names)
+
+    def test_memory_isolated_per_personality(self) -> None:
+        memory = ConversationMemory(max_turns=5)
+        memory.add("mentor", "what is database", "A database stores data.")
+        memory.add("dev", "fix auth bug", "Check token validation.")
+        mentor_ctx = memory.get_context("mentor")
+        dev_ctx = memory.get_context("dev")
+        self.assertIn("what is database", mentor_ctx)
+        self.assertNotIn("fix auth bug", mentor_ctx)
+        self.assertIn("fix auth bug", dev_ctx)
+
+
+class PersistenceTests(unittest.TestCase):
+    def test_long_term_memory_persists_across_instances(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "long_term_memory.json")
+            m1 = LongTermMemory(path=path)
+            m1.store("favorite_mode", "mentor")
+            m1.store_user_value("ram", "favorite_personality", "mentor")
+
+            m2 = LongTermMemory(path=path)
+            self.assertEqual(m2.get("favorite_mode"), "mentor")
+            self.assertEqual(m2.get_user_value("ram", "favorite_personality"), "mentor")
+
+    def test_user_profiles_create_login_data(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "users.json")
+            profiles = UserProfiles(path=path)
+            created = profiles.create_user("ram", personality="mentor")
+            self.assertEqual(created.get("personality"), "mentor")
+            found = profiles.get_user("ram")
+            self.assertEqual(found.get("personality"), "mentor")
+            self.assertIn("ram", profiles.list_users())
+
+    def test_vector_memory_persistence_and_recall(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "vector_memory.json")
+            vm = VectorMemory(enabled=True, path=path)
+            vm.add("User: improve login performance\nAI: use caching and indexes", user="ram", personality="dev")
+            vm.add("User: database normalization tips\nAI: use 3NF when appropriate", user="ram", personality="mentor")
+            results = vm.search("login performance", k=2, user="ram", personality="dev")
+            self.assertTrue(any("login performance" in item.lower() for item in results))
+
+            vm2 = VectorMemory(enabled=True, path=path)
+            results2 = vm2.search("login", k=2, user="ram", personality="dev")
+            self.assertTrue(len(results2) >= 1)
 
 class FormatterTests(unittest.TestCase):
     def test_cp1252_render_does_not_crash(self) -> None:

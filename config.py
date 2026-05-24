@@ -70,6 +70,14 @@ class AppConfig:
     dev_mode: bool = False
     review_logging: bool = False
     assistant_mode: str = "auto"
+    personality: str = "friendly"
+    vector_memory_enabled: bool = True
+    vector_memory_path: str = "sessions/vector_memory.json"
+    vector_memory_model: str = "all-MiniLM-L6-v2"
+    cloud_memory_enabled: bool = False
+    cloud_memory_url: str = ""
+    cloud_memory_key: str = ""
+    cloud_memory_table: str = "memory"
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -118,4 +126,12 @@ class AppConfig:
             dev_mode=os.getenv("RD_DEV_MODE", "false").lower() == "true",
             review_logging=os.getenv("RD_REVIEW_LOGS", "false").lower() == "true",
             assistant_mode=os.getenv("RD_ASSISTANT_MODE", "auto").strip().lower(),
+            personality=os.getenv("RD_PERSONALITY", "friendly").strip().lower(),
+            vector_memory_enabled=os.getenv("RD_VECTOR_MEMORY", "true").lower() == "true",
+            vector_memory_path=os.getenv("RD_VECTOR_MEMORY_PATH", "sessions/vector_memory.json"),
+            vector_memory_model=os.getenv("RD_VECTOR_MODEL", "all-MiniLM-L6-v2"),
+            cloud_memory_enabled=os.getenv("RD_CLOUD_MEMORY", "false").lower() == "true",
+            cloud_memory_url=os.getenv("RD_SUPABASE_URL", "").strip(),
+            cloud_memory_key=os.getenv("RD_SUPABASE_KEY", "").strip(),
+            cloud_memory_table=os.getenv("RD_CLOUD_MEMORY_TABLE", "memory").strip() or "memory",
         )

@@ -95,10 +95,10 @@ trx-ai > hi
 trx-ai > what is data warehouse
 
 # Review code
-trx-ai > review dsa_test.py
+trx-ai > review examples/dsa_test.py
 
 # Generate fixed code
-trx-ai > fix dsa_test.py
+trx-ai > fix examples/dsa_test.py
 
 # Show runtime status
 trx-ai > status
@@ -164,13 +164,26 @@ Runtime:
 
 ## Evaluation & Testing
 
-- Unit and smoke tests:
+- Unit tests, lint, and smoke tests (all run in CI on every push/PR):
 
 ```bash
-python -m pytest -q tests/test_trx_ai.py
-python main.py test
-python smoke_e2e.py --disable-llm --json-out sessions/smoke_e2e_report.json
+pip install -r requirements-dev.txt
+pytest --cov
+ruff check .
+python smoke_e2e.py --disable-llm --min-score 10
 ```
+
+- Code-review benchmark (66 labelled cases across 6 languages; needs a running local LLM):
+
+```bash
+trx eval                          # full run with plain-prompt baseline
+trx eval --no-baseline --limit 10 # quick check
+trx eval --category security      # one category
+```
+
+Every rate is reported with its sample size and a 95% Wilson confidence interval,
+next to a "chance floor" (what a generic, code-agnostic review would score).
+Results land in `reports/eval/` as text + JSON with model, git commit, and dataset hash.
 
 - JSON smoke report includes:
 - overall score out of 10
@@ -186,11 +199,15 @@ See:
 
 ## Setup
 
-1. Install dependencies:
+1. Install (Python 3.10+), from the repo root:
 
 ```bash
-pip install -r requirements.txt
+pip install -e .                 # core, provides the `trx` command
+pip install -e ".[semantic]"     # optional: embedding router + FAISS vector memory
+pip install -e ".[dev]"          # optional: pytest, coverage, ruff
 ```
+
+`pip install -r requirements.txt` still works if you prefer running `python main.py`.
 
 2. Configure `.env`:
 
@@ -211,7 +228,7 @@ RD_REVIEW_LOGS=false
 3. Run:
 
 ```bash
-python main.py
+trx            # or: python main.py
 ```
 
 ---
@@ -220,8 +237,11 @@ python main.py
 
 ```text
 chatcli/
-|-- main.py
-|-- analyzer.py
+|-- main.py              # CLI entry point (`trx`)
+|-- analyzer.py          # RealityAnalyzer orchestration
+|-- intent_rules.py      # rule-based intent signals
+|-- rule_engine.py       # deterministic fallback reasoning
+|-- llm_client.py        # local Ollama client with retry/backoff
 |-- formatter.py
 |-- watcher.py
 |-- history.py
@@ -229,6 +249,9 @@ chatcli/
 |-- evaluation.py
 |-- semantic_scoring.py
 |-- smoke_e2e.py
+|-- benchmarks/cases.jsonl
+|-- examples/
+|-- pyproject.toml
 |-- tests/
 |-- docs/
 |-- assets/

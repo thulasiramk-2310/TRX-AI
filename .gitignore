@@ -5,8 +5,6 @@
 
 # Generated reports
 reports/
-dsa_test.py
-dsa_test_fixed.py
 # Session/runtime outputs
 sessions/
 *.log
@@ -38,3 +36,22 @@ Thumbs.db
 
 # Generated fixed files (optional)
 *_fixed.py
+
+# AI agent / assistant tool files (never tracked)
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+GEMINI.md
+.cursor/
+.cursorrules
+.github/copilot-instructions.md
+.aider*
+.devreplay/
+.evolith/
+.ruff_cache/
+
+# Build outputs
+build/
+dist/
+*.egg-info/

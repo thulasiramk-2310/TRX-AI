@@ -14,311 +14,34 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-import requests
 
 from config import AppConfig
 from conversation_memory import ConversationMemory
 from graph_query_adapter import CodeReviewGraphAdapter
 from mcp_graph import detect_mcp_graph_status
 from observability import METRICS, log_event
+from personality import normalize_personality, personality_meta
 from router_memory import RouterMemory
 from semantic_router import SemanticRouter
+from vector_memory import VectorMemory
+from cloud_memory_sync import CloudMemorySync
+from intent_rules import (  # noqa: F401 - re-exported for existing importers
+    BASIC_KB,
+    STRONG_CODE_HINTS,
+    TECH_HINTS,
+    TRX_GREETING,
+    build_routing_debug,
+    classify_intent,
+    detect_intent,
+    detect_intent_confidence,
+    has_file_signal,
+    has_strong_code_signal,
+    has_tech_context,
+    is_general_question,
+)
+from llm_client import call_local_llm  # noqa: F401 - re-exported for existing importers
+from rule_engine import RuleEngine
 
-
-TRX_GREETING = "Hi there! 😊 What can I help you with today?"
-BASIC_KB = {
-    "data warehouse": "A data warehouse is a centralized system used to store and analyze large structured datasets for reporting and business intelligence.",
-    "network": "A network is a system of interconnected computers and devices that communicate and share resources.",
-}
-STRONG_CODE_HINTS = ["fix", "bug", "error", "exception", "stacktrace"]
-TECH_HINTS = [
-    "optimize", "performance", "latency",
-    "api", "system", "database", "backend",
-    "faster", "slow", "throughput", "login",
-]
-
-
-def classify_intent(text: str) -> str:
-    text = text.lower().strip()
-
-    if text.startswith(("what is", "define", "explain")):
-        return "theory"
-
-    if any(k in text for k in ["review", "fix", "code", "bug"]):
-        return "code"
-
-    if any(k in text for k in ["i failed", "improve", "problem"]):
-        return "problem"
-
-    return "chat"
-
-
-def is_general_question(text: str) -> bool:
-    keywords = ["what is", "explain", "define", "how does", "why"]
-    normalized = text.lower().strip()
-    return any(normalized.startswith(keyword) for keyword in keywords)
-
-
-def detect_intent(text: str) -> str:
-    text_l = text.lower().strip()
-
-    code_keywords = [
-        "fix", "bug", "error", "exception",
-        "function", "class", "file", "repo",
-        "refactor", "optimize", "review",
-    ]
-    general_patterns = [
-        "what is", "explain", "define", "why", "how",
-    ]
-
-    if any(keyword in text_l for keyword in code_keywords):
-        return "code"
-    if has_tech_context(text_l):
-        return "code"
-    if any(text_l.startswith(pattern) for pattern in general_patterns):
-        return "general"
-    return "general"
-
-
-def detect_intent_confidence(text: str) -> tuple[str, float]:
-    normalized = text.lower().strip()
-    if normalized in {"hi", "hello", "hey"}:
-        return "general", 1.0
-
-    code_patterns = [
-        r"\bfix\b", r"\bbug\b", r"\berror\b", r"\bexception\b",
-        r"\bfunction\b", r"\bclass\b", r"\bfile\b", r"\brepo\b",
-        r"\brefactor\b", r"\boptimize\b", r"\breview\b",
-        r"\bperformance\b", r"\blatency\b", r"\bapi\b", r"\bbackend\b", r"\bdatabase\b",
-        r"```", r"^\s*def\s+\w+\s*\(", r"^\s*class\s+\w+",
-    ]
-    hits = 0
-    for pattern in code_patterns:
-        if re.search(pattern, normalized, flags=re.MULTILINE):
-            hits += 1
-    if hits > 0:
-        return "code", min(0.98, 0.52 + (0.15 * hits))
-    return "general", 0.55
-
-
-def has_strong_code_signal(text: str) -> bool:
-    text_l = text.lower()
-    return any(re.search(rf"\b{re.escape(word)}\b", text_l) for word in STRONG_CODE_HINTS)
-
-
-def has_file_signal(text: str) -> bool:
-    return bool(re.search(r"\b\w+\.(py|js|ts|java|cpp|go)\b", text.lower()))
-
-
-def has_tech_context(text: str) -> bool:
-    lowered = text.lower()
-    return any(word in lowered for word in TECH_HINTS)
-
-
-def build_routing_debug(text: str, auto_intent: str, auto_conf: float, threshold: float) -> dict[str, Any]:
-    normalized = text.lower().strip()
-    return {
-        "input": text,
-        "intent": auto_intent,
-        "confidence": round(float(auto_conf), 3),
-        "threshold": float(threshold),
-        "signals": {
-            "strong_code": has_strong_code_signal(text),
-            "file_signal": has_file_signal(text),
-            "tech_context": has_tech_context(text),
-            "greeting": normalized in {"hi", "hello", "hey"},
-        },
-    }
-
-
-class RuleEngine:
-    """Deterministic reasoning layer used as fallback."""
-
-    STOPWORDS = {
-        "a", "an", "the", "is", "am", "are", "was", "were", "and", "or", "but", "for",
-        "with", "to", "of", "in", "on", "at", "by", "from", "this", "that", "it", "my",
-        "our", "we", "i", "you", "they", "he", "she", "them", "as", "be", "been", "being",
-    }
-
-    def analyze(self, user_input: str, mode: str, past_context: list[dict[str, Any]]) -> dict[str, Any]:
-        text = user_input.lower()
-        nlp = self.extract_nlp_signals(user_input)
-
-        debug_analysis: list[str] = []
-        improvements: list[str] = []
-        predictions: list[str] = []
-
-        if nlp["keywords"]:
-            debug_analysis.append("Primary themes: " + ", ".join(nlp["keywords"][:8]))
-        if len(nlp["clauses"]) > 1:
-            debug_analysis.append("Multiple linked conditions detected, indicating layered causes.")
-
-        if "failed exam" in text or ("exam" in text and "fail" in text):
-            debug_analysis.append("Preparation depth appears insufficient for exam-level performance.")
-            improvements.append("Use a daily timed-practice schedule with weekly review checkpoints.")
-
-        if "tired" in text or "exhausted" in text or "burnout" in text:
-            debug_analysis.append("Energy management is reducing focus quality and consistency.")
-            improvements.append("Stabilize sleep and protect one distraction-free recovery hour daily.")
-
-        if "procrast" in text:
-            debug_analysis.append("Task-start friction is causing avoidable delays.")
-            improvements.append("Break work into 20-25 minute blocks and start from the easiest block.")
-
-        if any(token in text for token in ("deadline", "late", "delay", "delays", "missed")):
-            debug_analysis.append("Delivery reliability is impacted by weak milestone planning.")
-            improvements.append("Set dated milestones with clear done criteria and owner per milestone.")
-
-        if any(token in text for token in ("team", "communication", "misaligned", "inconsistent")):
-            debug_analysis.append("Coordination gaps are creating execution inconsistency.")
-            improvements.append("Run short daily syncs and enforce handoff standards.")
-
-        repeated = self._extract_repeated_topics(text, past_context)
-        if repeated:
-            debug_analysis.append("Recurring topics detected: " + ", ".join(repeated[:3]))
-            improvements.append("Prioritize these recurring issues first for maximum leverage.")
-
-        if mode == "optimize":
-            improvements.append("Rank actions by impact-to-effort ratio and execute top priority first.")
-
-        if mode == "predict":
-            predictions.append("If unchanged, current behavior is likely to increase near-term risk.")
-            predictions.append("If top fixes are applied consistently, outcomes should stabilize in 2-8 weeks.")
-
-        if not debug_analysis:
-            debug_analysis.append("No strong trigger found. Problem framing needs more specifics.")
-            improvements.append("Clarify goal, blocker, and success metric before next iteration.")
-
-        if not predictions:
-            predictions.append("Without corrective action, current issues are likely to persist.")
-            predictions.append("With consistent execution, reliability should improve over upcoming cycles.")
-
-        confidence = 64 + min(10, len(nlp["keywords"])) + min(6, 2 * len(repeated))
-        confidence = max(45, min(90, confidence))
-
-        return {
-            "debug_analysis": self._dedupe(debug_analysis),
-            "improvements": self._dedupe(improvements),
-            "predictions": self._dedupe(predictions),
-            "confidence_score": confidence,
-        }
-
-    def extract_nlp_signals(self, text: str) -> dict[str, Any]:
-        normalized = re.sub(r"[^a-zA-Z0-9\s,.;:!?'-]", " ", text.lower())
-        tokens = [tok for tok in re.findall(r"[a-zA-Z][a-zA-Z'-]{2,}", normalized)]
-        keywords = [tok for tok in tokens if tok not in self.STOPWORDS]
-        clauses = [
-            part.strip()
-            for part in re.split(r"[.;!?]|\bbut\b|\bbecause\b|\bwhile\b|\balthough\b", normalized)
-            if part.strip()
-        ]
-        return {
-            "keywords": self._top_keywords(keywords, 10),
-            "clauses": clauses[:6],
-        }
-
-    @staticmethod
-    def _top_keywords(values: list[str], limit: int) -> list[str]:
-        counts: dict[str, int] = {}
-        for value in values:
-            counts[value] = counts.get(value, 0) + 1
-        ranked = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
-        return [item[0] for item in ranked[:limit]]
-
-    @staticmethod
-    def _extract_repeated_topics(text: str, context: list[dict[str, Any]]) -> list[str]:
-        matched: list[str] = []
-        topics = ("exam", "sleep", "deadline", "team", "stress", "procrast")
-        for entry in context:
-            previous = str(entry.get("input", "")).lower()
-            for topic in topics:
-                if topic in text and topic in previous and topic not in matched:
-                    matched.append(topic)
-        return matched
-
-    @staticmethod
-    def _dedupe(items: list[str]) -> list[str]:
-        seen: set[str] = set()
-        result: list[str] = []
-        for item in items:
-            key = item.strip().lower()
-            if key and key not in seen:
-                result.append(item.strip())
-                seen.add(key)
-        return result
-
-
-def call_local_llm(
-    prompt: str,
-    *,
-    url: str = "http://localhost:11434/api/generate",
-    model: str = "qwen3:8b",
-    timeout: int = 120,
-    max_new_tokens: int = 600,
-    temperature: float = 0.3,
-    retries: int = 2,
-) -> dict[str, Any]:
-    """Calls local Ollama and returns normalized response metadata."""
-    last_status: int | None = None
-    attempts = max(1, retries)
-    for attempt in range(attempts):
-        try:
-            response = requests.post(
-                url,
-                json={
-                    "model": model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "think": False,
-                    "options": {
-                        "num_predict": max(32, int(max_new_tokens)),
-                        "temperature": max(0.0, min(1.0, float(temperature))),
-                    },
-                },
-                timeout=timeout,
-            )
-
-            last_status = response.status_code
-            if response.status_code != 200:
-                continue
-
-            try:
-                data = response.json()
-            except ValueError:
-                continue
-
-            text = str(data.get("response", "")).strip()
-            if not text:
-                text = str(data.get("generated_text", "")).strip()
-            if not text:
-                text = str(data.get("output_text", "")).strip()
-            if not text:
-                message = data.get("message")
-                if isinstance(message, dict):
-                    text = str(message.get("content", "")).strip()
-            if not text:
-                choices = data.get("choices")
-                if isinstance(choices, list) and choices:
-                    first = choices[0]
-                    if isinstance(first, dict):
-                        text = str(first.get("text", "")).strip()
-                        if not text and isinstance(first.get("message"), dict):
-                            text = str(first["message"].get("content", "")).strip()
-            if text:
-                return {
-                    "ok": True,
-                    "text": text,
-                    "status_code": response.status_code,
-                    "done_reason": data.get("done_reason"),
-                    "attempts": attempt + 1,
-                }
-        except requests.RequestException:
-            pass
-
-        if attempt < attempts - 1:
-            time.sleep(0.5 * (attempt + 1))
-
-    return {"ok": False, "text": "", "status_code": last_status, "attempts": attempts}
 
 
 class RealityAnalyzer:
@@ -345,6 +68,8 @@ class RealityAnalyzer:
 
     def __init__(self, config: AppConfig) -> None:
         self.config = config
+        self.personality = normalize_personality(getattr(config, "personality", "friendly"))
+        self.current_user = "guest"
         self._response_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._review_response_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._agent_flags: dict[str, bool] = {
@@ -360,6 +85,29 @@ class RealityAnalyzer:
         self._router_memory = RouterMemory()
         self._conversation_memory = ConversationMemory(max_turns=5)
         self._semantic_router = SemanticRouter()
+        self._vector_memory = VectorMemory(
+            enabled=bool(getattr(self.config, "vector_memory_enabled", True)),
+            path=str(getattr(self.config, "vector_memory_path", "sessions/vector_memory.json")),
+            embedding_model=str(getattr(self.config, "vector_memory_model", "all-MiniLM-L6-v2")),
+        )
+        self._cloud_memory = CloudMemorySync(
+            enabled=bool(getattr(self.config, "cloud_memory_enabled", False)),
+            url=str(getattr(self.config, "cloud_memory_url", "")),
+            key=str(getattr(self.config, "cloud_memory_key", "")),
+            table=str(getattr(self.config, "cloud_memory_table", "memory")),
+        )
+
+    def set_personality(self, value: str) -> str:
+        self.personality = normalize_personality(value)
+        return self.personality
+
+    def get_personality(self) -> str:
+        return str(self.personality)
+
+    def set_current_user(self, username: str) -> str:
+        value = str(username or "guest").strip().lower()
+        self.current_user = value or "guest"
+        return self.current_user
 
     def set_active_agents(self, agents: list[str]) -> list[str]:
         normalized = [item.strip().lower() for item in agents if item.strip()]
@@ -568,6 +316,7 @@ class RealityAnalyzer:
         else:
             result["mcp_query_status"] = "UNKNOWN"
         result["cache_hit"] = any(item == "cache_hit" for item in statuses)
+        result["personality"] = self.personality
         breaker_state = str(METRICS.snapshot().get("states", {}).get("circuit_breaker_state", "CLOSED"))
         result["circuit_breaker_state"] = breaker_state
         METRICS.set_state("circuit_breaker_state", breaker_state)
@@ -589,7 +338,24 @@ class RealityAnalyzer:
             response = str(result.get("chat_response", "")).strip()
             if user_input and response:
                 try:
-                    self._conversation_memory.add(user_input, response)
+                    self._conversation_memory.add(self.personality, user_input, response)
+                except Exception:
+                    pass
+                try:
+                    semantic_text = f"User: {user_input}\nAI: {response}"
+                    self._vector_memory.add(
+                        semantic_text,
+                        user=self.current_user,
+                        personality=self.personality,
+                    )
+                except Exception:
+                    pass
+                try:
+                    self._cloud_memory.sync_memory(
+                        self.current_user,
+                        f"User: {user_input}\nAI: {response}",
+                        personality=self.personality,
+                    )
                 except Exception:
                     pass
         return result
@@ -794,12 +560,23 @@ class RealityAnalyzer:
 
     def _handle_general_qa(self, query: str) -> dict[str, Any]:
         q = query.lower().strip()
+        meta = personality_meta(self.personality)
+        context = self._conversation_memory.get_context(self.personality).strip()
+        related = self._vector_memory.search(
+            query,
+            k=3,
+            user=self.current_user if self.current_user != "guest" else None,
+            personality=self.personality,
+        )
+        related_context = "\n".join(f"- {item}" for item in related[:3]).strip()
+        cloud_related = self._cloud_memory.fetch_memory(self.current_user, limit=2) if self.current_user != "guest" else []
+        cloud_context = "\n".join(f"- {item}" for item in cloud_related if str(item).strip()).strip()
 
         # Greeting fast path before any LLM call.
         if q in {"hi", "hello", "hey"}:
             return {
                 "response_mode": "chat",
-                "chat_response": "Hey! 👋 I'm TRX. How can I help you today?",
+                "chat_response": self._format_personality_response("Hey! 👋 I'm TRX. How can I help you today?"),
                 "confidence": 1.0,
                 "status": ["general_fastpath"],
                 "analysis_source": "rule-fastpath",
@@ -808,7 +585,7 @@ class RealityAnalyzer:
         if q in {"hi trx", "hey trx", "hello trx", "trx", "trx-ai"}:
             return {
                 "response_mode": "chat",
-                "chat_response": TRX_GREETING,
+                "chat_response": self._format_personality_response(TRX_GREETING),
                 "confidence": 1.0,
                 "status": ["general_fastpath"],
                 "analysis_source": "rule-fastpath",
@@ -818,7 +595,7 @@ class RealityAnalyzer:
         if q in {"bye", "goodbye", "see you", "exit", "quit"}:
             return {
                 "response_mode": "chat",
-                "chat_response": "Goodbye! 👋 It was nice talking to you. Come back anytime.",
+                "chat_response": self._format_personality_response("Goodbye! 👋 It was nice talking to you. Come back anytime."),
                 "confidence": 1.0,
                 "status": ["general_fastpath"],
                 "analysis_source": "rule-fastpath",
@@ -827,13 +604,15 @@ class RealityAnalyzer:
         if "what can you do" in q or "what u can do" in q:
             return {
                 "response_mode": "chat",
-                "chat_response": (
+                "chat_response": self._format_personality_response(
+                    (
                     "Hey! 👋 I can help you with:\n\n"
                     "• Explaining concepts (like data warehouse, networks, etc.)\n"
                     "• Solving coding problems and debugging\n"
                     "• Reviewing and improving your code\n"
                     "• Answering general questions or helping you study\n\n"
                     "Just tell me what you need 🙂"
+                    )
                 ),
                 "confidence": 1.0,
                 "status": ["general_fastpath"],
@@ -844,13 +623,15 @@ class RealityAnalyzer:
         if len(q.split()) <= 2:
             return {
                 "response_mode": "chat",
-                "chat_response": "Hey! 👋 What would you like to explore today?",
+                "chat_response": self._format_personality_response("Hey! 👋 What would you like to explore today?"),
                 "confidence": 0.9,
                 "analysis_source": "rule-fastpath",
             }
 
         prompt = f"""
 You are TRX, an intelligent AI assistant.
+
+Personality: {meta['instruction']}
 
 Answer the user's question directly and naturally.
 
@@ -861,6 +642,15 @@ DO NOT:
 
 ONLY:
 - give a clear, helpful answer
+
+Conversation:
+{context}
+
+Relevant past context:
+{related_context}
+
+Cloud memory:
+{cloud_context}
 
 User: {query}
 Answer:
@@ -876,7 +666,7 @@ Answer:
             )
         return {
             "response_mode": "chat",
-            "chat_response": cleaned,
+            "chat_response": self._format_personality_response(cleaned),
             "analysis_source": "llm" if response_text.strip() else "rule-fallback",
         }
 
@@ -894,6 +684,17 @@ Answer:
             if pattern in lowered:
                 return "Let me answer that directly: " + text.split(":")[-1].strip()
         return text
+
+    def _format_personality_response(self, answer: str) -> str:
+        text = str(answer or "").strip()
+        if not text:
+            return text
+        prefix = str(personality_meta(self.personality).get("prefix", "")).strip()
+        if not prefix:
+            return text
+        if text.startswith(prefix):
+            return text
+        return f"{prefix} {text}"
 
     def call_llm(self, prompt: str, temperature: float | None = None) -> str:
         local = self._call_local(prompt, temperature=temperature)

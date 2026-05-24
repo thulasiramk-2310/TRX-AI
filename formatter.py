@@ -15,6 +15,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from personality import personality_meta
+
 
 class OutputFormatter:
     """Renders a futuristic multi-panel dashboard for chat and analysis responses."""
@@ -357,9 +359,11 @@ class OutputFormatter:
             if not chat_response:
                 chat_response = "I am here to help."
             confidence_label = "High" if analysis.get("analysis_source") == "llm" else "Medium"
+            personality = str(analysis.get("personality", "friendly"))
+            pmeta = personality_meta(personality)
             branded = (
                 "[TRX RESPONSE]\n\n"
-                "💬 Response:\n"
+                f"{pmeta['prefix']} Response:\n"
                 f"{chat_response}\n\n"
                 "Insight:\n"
                 "Ask follow-up questions for deeper detail.\n\n"
@@ -613,8 +617,8 @@ class OutputFormatter:
                 "export compare <file> -> Compare last two analyses in PDF. Example: export compare run_diff.pdf",
             ],
             "improvements": [
-                "review <file|folder> -> Run code review. Example: review dsa_test.py",
-                "fix <file> -> Generate fixed code with preview + confirm (y/n). Example: fix demo.py",
+                "review <file|folder> -> Run code review. Example: review examples/dsa_test.py",
+                "fix <file> -> Generate fixed code with preview + confirm (y/n). Example: fix examples/demo.py",
                 "watch <folder> -> Auto-review changes in supported code files. Example: watch .",
                 "agents all | agents debug improve predict -> Control agent modules. Example: agents all",
             ],
@@ -625,8 +629,8 @@ class OutputFormatter:
                 "Best flow: review file -> inspect output -> fix file -> export report",
             ],
             "final_insight": [
-                "Quick Start 1: review dsa_test.py",
-                "Quick Start 2: fix dsa_test.py",
+                "Quick Start 1: review examples/dsa_test.py",
+                "Quick Start 2: fix examples/dsa_test.py",
                 "Quick Start 3: export report.pdf",
                 "Tip: Keep review targets focused (single file) for higher quality fixes",
             ],

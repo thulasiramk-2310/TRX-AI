@@ -97,10 +97,16 @@ def run_smoke(*, disable_llm: bool = False) -> dict[str, Any]:
     }
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description="TRX consolidated smoke e2e")
     parser.add_argument("--json-out", default="sessions/smoke_e2e_report.json")
     parser.add_argument("--disable-llm", action="store_true")
+    parser.add_argument(
+        "--min-score",
+        type=float,
+        default=None,
+        help="Exit non-zero when score_out_of_10 is below this value (for CI).",
+    )
     args = parser.parse_args()
 
     report = run_smoke(disable_llm=args.disable_llm)
@@ -108,8 +114,13 @@ def main() -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({"report": str(out_path), "score_out_of_10": report["score_out_of_10"]}, ensure_ascii=False))
+    if args.min_score is not None and report["score_out_of_10"] < args.min_score:
+        failed = [row for row in report["matrix"] if not row.get("pass")]
+        print(f"Smoke score {report['score_out_of_10']} is below --min-score {args.min_score}; failing: {failed}")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
 
