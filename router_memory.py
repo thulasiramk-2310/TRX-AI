@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from guardrails import redact
 import json
 from collections import defaultdict
 from pathlib import Path
@@ -50,7 +51,7 @@ class RouterMemory:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             serializable: dict[str, Any] = dict(self.stats)
-            self.path.write_text(json.dumps(serializable, ensure_ascii=False), encoding="utf-8")
+            self.path.write_text(json.dumps(redact(serializable), ensure_ascii=False), encoding="utf-8")
         except OSError:
             return
 

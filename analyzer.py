@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from guardrails import redact
 import ast
 import copy
 import hashlib
@@ -40,6 +41,7 @@ from intent_rules import (  # noqa: F401 - re-exported for existing importers
     is_general_question,
 )
 from llm_client import call_local_llm  # noqa: F401 - re-exported for existing importers
+from guardrails import UNTRUSTED_CODE_RULE, fence_untrusted_code
 from rule_engine import RuleEngine
 
 
@@ -545,17 +547,19 @@ class RealityAnalyzer:
             response_text = self.call_llm(self._build_theory_prompt(user_input, simple=True))
 
         cleaned = response_text.strip()
+        source = "llm"
         if not cleaned:
             lowered = user_input.lower()
             kb_answer = next((answer for key, answer in BASIC_KB.items() if key in lowered), "")
             cleaned = kb_answer or "Definition: A concise definition is currently unavailable."
+            source = "knowledge-base"
         return {
             "response_mode": "chat",
             "chat_response": cleaned,
             "intent": "theory",
             "intent_source": "rule",
             "intent_confidence": 1.0,
-            "analysis_source": "llm",
+            "analysis_source": source,
         }
 
     def _handle_general_qa(self, query: str) -> dict[str, Any]:
@@ -1043,7 +1047,7 @@ Answer:
             "Return plain text.\n\n"
             f"Failure Memory:\n{failure_context}\n\n"
             f"Graph Context:\n{graph_context_text}\n\n"
-            f"{code_for_prompt}"
+            f"{UNTRUSTED_CODE_RULE}\n{fence_untrusted_code(code_for_prompt)}"
         )
         analyzer_resp = self._call_local(analyzer_prompt, max_new_tokens=350)
         if not analyzer_resp.get("ok"):
@@ -1067,7 +1071,7 @@ Answer:
             f"Failure Memory:\n{failure_context}\n\n"
             f"Graph Context:\n{graph_context_text}\n\n"
             f"Analyzer Notes:\n{analyzer_notes}\n\n"
-            f"Code:\n{code_for_prompt}"
+            f"{UNTRUSTED_CODE_RULE}\n{fence_untrusted_code(code_for_prompt)}"
         )
         generator_resp = self._call_local(generator_prompt, max_new_tokens=1000)
         if not generator_resp.get("ok"):
@@ -1115,13 +1119,14 @@ Answer:
 
             fixer_prompt = (
                 "You are Fixer Agent.\n"
-                "Improve the review text below.\n"
-                "- Keep exact required sections\n"
-                "- Increase specificity\n"
-                f"- Ensure FIXED CODE is complete and valid {language} code\n\n"
+                "Rewrite the code review below so it addresses the critic issues.\n"
+                "Output ONLY the review, starting with the line 'CODE DEBUG:'. No preamble, no closing remarks,\n"
+                "no JSON or YAML. Use exactly these plain section headers: CODE DEBUG:, CODE IMPROVEMENTS:,\n"
+                "PERFORMANCE:, SECURITY:, FIX SUGGESTIONS:, FIXED CODE:, FINAL SUMMARY:, CONFIDENCE:\n"
+                f"FIXED CODE must be complete and valid {language} code.\n\n"
                 f"Critic Issues:\n{issues_text or '- low confidence'}\n\n"
-                f"Review Text:\n{candidate}\n\n"
-                f"Original Code:\n{code_for_prompt}"
+                f"Review To Rewrite:\n{candidate}\n\n"
+                f"{UNTRUSTED_CODE_RULE}\n{fence_untrusted_code(code_for_prompt)}"
             )
             fixer_resp = self._call_local(fixer_prompt, max_new_tokens=1200)
             if not fixer_resp.get("ok"):
@@ -1447,7 +1452,7 @@ Answer:
         try:
             self._failure_memory_path.parent.mkdir(parents=True, exist_ok=True)
             self._failure_memory_path.write_text(
-                json.dumps(self._failure_memory[-30:], indent=2),
+                json.dumps(redact(self._failure_memory[-30:]), indent=2),
                 encoding="utf-8",
             )
         except OSError:
@@ -1466,13 +1471,18 @@ Answer:
     def _failure_context_snippet(self) -> str:
         if not self._failure_memory:
             return "none"
-        recent = self._failure_memory[-3:]
-        lines = []
-        for item in recent:
-            lines.append(
-                f"- input={item.get('input','')[:80]} | reason={item.get('failure_reason','')[:80]}"
-            )
-        return "\n".join(lines)
+        # Only failure reasons are shared. Earlier inputs are other users' code; putting them
+        # in the prompt makes the model review the wrong snippet.
+        reasons: list[str] = []
+        for item in reversed(self._failure_memory):
+            reason = str(item.get("failure_reason", "")).strip()[:80]
+            if reason and reason not in reasons:
+                reasons.append(reason)
+            if len(reasons) == 3:
+                break
+        if not reasons:
+            return "none"
+        return "\n".join(f"- recent failure: {reason}" for reason in reasons)
 
     @staticmethod
     def _detect_language(code: str) -> str:
@@ -1501,8 +1511,8 @@ You are a senior software engineer performing a deep and practical {language} co
 
 Analyze the following code carefully and provide actionable insights.
 
-CODE:
-{code}
+{UNTRUSTED_CODE_RULE}
+{fence_untrusted_code(code)}
 
 RECENT FAILURE MEMORY (use this to avoid repeating weak behavior):
 {failure_context}
@@ -1597,6 +1607,9 @@ IMPORTANT:
             cleaned = cleaned.rstrip(":").strip().upper()
             return cleaned
 
+        if not RealityAnalyzer._has_header_outside_fences(text, header_aliases, _normalize_header):
+            text = RealityAnalyzer._unwrap_prose_fences(text)
+
         current: str | None = None
         in_code_block = False
         for raw in text.splitlines():
@@ -1651,6 +1664,68 @@ IMPORTANT:
             "confidence_score": confidence_score,
         }
 
+    REVIEW_KEY_ALIASES = {
+        "code debug": "code_debug",
+        "debug analysis": "code_debug",
+        "code improvements": "code_improvements",
+        "improvements": "code_improvements",
+        "performance": "performance",
+        "security": "security",
+        "security (if applicable)": "security",
+        "fix suggestions": "fix_suggestions",
+        "fixed code": "fixed_code",
+        "final summary": "final_summary",
+        "confidence": "confidence",
+    }
+
+    @staticmethod
+    def _canonical_review_keys(payload: dict[str, Any]) -> dict[str, Any]:
+        """Maps header-style keys such as "CODE DEBUG" or "Fixed Code" to snake_case section keys."""
+        out: dict[str, Any] = {}
+        for key, value in payload.items():
+            normalized = re.sub(r"[\s_]+", " ", str(key)).strip().lower()
+            canonical = RealityAnalyzer.REVIEW_KEY_ALIASES.get(normalized, str(key))
+            out.setdefault(canonical, value)
+        return out
+
+    PROSE_FENCE_LANGUAGES = {"yaml", "yml", "plaintext", "text", "txt", "markdown", "md"}
+
+    @staticmethod
+    def _has_header_outside_fences(text: str, header_aliases: dict[str, str], normalize: Any) -> bool:
+        in_fence = False
+        for raw in text.splitlines():
+            line = raw.strip()
+            if line.startswith("```"):
+                in_fence = not in_fence
+                continue
+            if not in_fence and normalize(line) in header_aliases:
+                return True
+        return False
+
+    @staticmethod
+    def _unwrap_prose_fences(text: str) -> str:
+        """Drops the fence markers around prose blocks so their section headers can be read.
+
+        The model sometimes wraps its whole review in ```yaml or ```plaintext. Fences with a
+        programming language (or none) are kept, because those hold code, not review text.
+        """
+        out: list[str] = []
+        unwrapping = False
+        in_code = False
+        for raw in text.splitlines():
+            line = raw.strip()
+            if line.startswith("```"):
+                lang = line[3:].strip().lower()
+                if unwrapping:
+                    unwrapping = False
+                    continue
+                if not in_code and lang in RealityAnalyzer.PROSE_FENCE_LANGUAGES:
+                    unwrapping = True
+                    continue
+                in_code = not in_code
+            out.append(raw)
+        return "\n".join(out)
+
     @staticmethod
     def _try_parse_review_json(text: str) -> dict[str, Any] | None:
         payload: dict[str, Any] | None = None
@@ -1667,7 +1742,7 @@ IMPORTANT:
             if not candidate:
                 continue
             try:
-                parsed = json.loads(candidate)
+                parsed = json.loads(candidate, strict=False)
             except ValueError:
                 continue
             if isinstance(parsed, dict):
@@ -1676,6 +1751,7 @@ IMPORTANT:
 
         if payload is None:
             return None
+        payload = RealityAnalyzer._canonical_review_keys(payload)
 
         def _normalize_items(value: Any) -> list[str]:
             out: list[str] = []
@@ -1700,6 +1776,10 @@ IMPORTANT:
                             out.append(text_item)
             elif isinstance(value, dict):
                 for key, val in value.items():
+                    if isinstance(val, (list, dict)):
+                        # e.g. {"Issues": [...]} -> flatten the inner items.
+                        out.extend(_normalize_items(val))
+                        continue
                     line = f"{str(key).strip()}: {str(val).strip()}".strip(": ").strip()
                     if line:
                         out.append(line)
@@ -1864,8 +1944,13 @@ IMPORTANT:
             match = re.search(r"\{[\s\S]*\}", response_text)
             raw_json = match.group(0) if match else response_text.strip()
             try:
-                parsed = json.loads(raw_json)
+                parsed = RealityAnalyzer._canonical_review_keys(json.loads(raw_json, strict=False))
                 fixed_value = parsed.get("fixed_code")
+                if isinstance(fixed_value, dict):
+                    fixed_value = next(
+                        (v for k, v in fixed_value.items() if str(k).lower() == "code" and isinstance(v, str)),
+                        next((v for v in fixed_value.values() if isinstance(v, str)), ""),
+                    )
                 if isinstance(fixed_value, str) and fixed_value.strip():
                     return fixed_value.strip()
                 if isinstance(fixed_value, list):
@@ -2251,7 +2336,7 @@ IMPORTANT:
             ]
             payload = {"version": 1, "items": items}
             self._review_cache_disk_path.write_text(
-                json.dumps(payload, ensure_ascii=False),
+                json.dumps(redact(payload), ensure_ascii=False),
                 encoding="utf-8",
             )
         except OSError:

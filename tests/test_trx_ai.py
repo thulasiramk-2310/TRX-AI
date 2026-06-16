@@ -366,7 +366,11 @@ class FormatterTests(unittest.TestCase):
         formatter.render(analysis, "debug", total_runs=1)
         stream.flush()
         output = buffer.getvalue().decode("cp1252", errors="replace")
-        self.assertTrue(("TRX-AI Assistant" in output) or ("TRX-AI Futuristic Developer Dashboard" in output))
+        # cp1252 can't encode the Unicode glyphs, so the renderer must fall back to ASCII.
+        self.assertIn("ISSUES", output)
+        self.assertIn("Prioritize complexity fix", output)
+        self.assertIn("75%", output)
+        self.assertIn("/ REVIEW", output)
 
 
 class CLISmokeTests(unittest.TestCase):

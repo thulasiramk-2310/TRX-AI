@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from guardrails import redact_secrets
 
 try:
     from supabase import create_client  # type: ignore
@@ -39,7 +40,7 @@ class CloudMemorySync:
             self.client.table(self.table).insert(
                 {
                     "user": str(user or "guest"),
-                    "text": str(text or ""),
+                    "text": redact_secrets(str(text or ""))[0],
                     "personality": str(personality or "friendly"),
                 }
             ).execute()

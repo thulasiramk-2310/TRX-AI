@@ -10,6 +10,8 @@ from typing import Any, Callable
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
+from guardrails import check_fix
+
 SUPPORTED_CODE_SUFFIXES = {
     ".py", ".js", ".ts", ".java", ".c", ".cpp", ".cc", ".cs",
     ".go", ".rs", ".swift", ".kt", ".php", ".sql", ".rb",
@@ -70,11 +72,16 @@ class CodeChangeHandler(FileSystemEventHandler):
 
             if self.auto_fix and self.fix_writer is not None:
                 fixed_code = str(result.get("fixed_code", "")).strip()
-                if fixed_code:
-                    fixed_path = self.fix_writer(str(file_path), fixed_code)
-                    print(f"[Auto Fix] Saved: {fixed_path}")
-                else:
+                if not fixed_code:
                     print("[Auto Fix] No fixed code generated.")
+                    return
+                # Nobody confirms auto-fixes, so any blocking guardrail finding means "don't save".
+                blocked = [f for f in check_fix(code, fixed_code, file_path.suffix.lstrip(".")) if f.blocking]
+                if blocked:
+                    print("[Auto Fix] Not saved, blocked by guardrails: " + "; ".join(f.message for f in blocked))
+                    return
+                fixed_path = self.fix_writer(str(file_path), fixed_code)
+                print(f"[Auto Fix] Saved: {fixed_path}")
         except Exception as exc:
             print(f"[Watcher error] {exc}")
 

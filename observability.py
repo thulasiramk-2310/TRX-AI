@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from guardrails import redact
 import json
 import os
 import threading
@@ -67,8 +68,17 @@ class MetricsCollector:
 METRICS = MetricsCollector()
 
 
+_LOG_LOCK = threading.Lock()
+
+
 def log_event(event: str, **fields: Any) -> None:
-    if os.getenv("RD_STRUCTURED_LOGS", "true").lower() != "true":
+    """Appends one JSON line per event.
+
+    RD_STRUCTURED_LOGS: "true" (default) writes to RD_LOG_FILE (sessions/trx_events.jsonl) so the
+    interactive transcript stays clean; "stdout" prints instead (old behaviour); "false" disables.
+    """
+    target = os.getenv("RD_STRUCTURED_LOGS", "true").lower()
+    if target not in {"true", "stdout"}:
         return
     payload = {
         "ts": int(time.time() * 1000),
@@ -76,6 +86,13 @@ def log_event(event: str, **fields: Any) -> None:
         **fields,
     }
     try:
-        print(json.dumps(payload, ensure_ascii=False))
+        line = json.dumps(redact(payload), ensure_ascii=False)
+        if target == "stdout":
+            print(line)
+            return
+        path = Path(os.getenv("RD_LOG_FILE", "sessions/trx_events.jsonl"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _LOG_LOCK, path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
     except Exception:
         pass

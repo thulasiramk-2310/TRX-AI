@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from guardrails import redact, redact_secrets
 import json
 import textwrap
 import re
@@ -65,7 +66,7 @@ class SessionHistory:
             destination = output_dir / f"reality_debugger_session_{stamp}.json"
 
         with destination.open("w", encoding="utf-8") as session_file:
-            json.dump(self.entries, session_file, indent=2)
+            json.dump(redact(self.entries), session_file, indent=2)
 
         return destination
 
@@ -94,7 +95,7 @@ class SessionHistory:
             f"{structured_output}\n"
         )
 
-        destination.write_text(content, encoding="utf-8")
+        destination.write_text(redact_secrets(content)[0], encoding="utf-8")
         return destination
 
     def export_pdf_report(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from guardrails import redact
 import json
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,7 @@ class LongTermMemory:
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.path.write_text(json.dumps(redact(self.data), ensure_ascii=False, indent=2), encoding="utf-8")
 
     def store(self, key: str, value: Any) -> None:
         self.data[str(key)] = value

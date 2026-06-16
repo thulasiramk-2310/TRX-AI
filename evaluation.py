@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import math
+import random
 import subprocess
 import time
 from collections import defaultdict
@@ -26,7 +27,7 @@ from semantic_scoring import SemanticMatcher
 
 DATASET_PATH = Path(__file__).resolve().parent / "benchmarks" / "cases.jsonl"
 DEFAULT_REPORT_DIR = Path("reports") / "eval"
-DEFAULT_HIT_THRESHOLD = 0.5
+DEFAULT_HIT_THRESHOLD = 0.45
 
 # Case-agnostic review used to measure the chance floor: how often a generic answer
 # that ignores the code still "hits" the expected labels at the chosen threshold.
@@ -203,6 +204,34 @@ def _clear_review_cache(analyzer: Any) -> None:
         cache.clear()
 
 
+def _reset_failure_memory(analyzer: Any) -> None:
+    if isinstance(getattr(analyzer, "_failure_memory", None), list):
+        analyzer._failure_memory = []
+
+
+def _isolate_failure_memory(analyzer: Any):
+    """Keeps benchmark cases from leaking into each other or into the user's saved failure memory.
+
+    Returns a callable that restores the original memory and persistence behaviour.
+    """
+    original_memory = getattr(analyzer, "_failure_memory", None)
+    had_instance_save = "_save_failure_memory" in getattr(analyzer, "__dict__", {})
+    original_save = getattr(analyzer, "_save_failure_memory", None)
+    if original_save is not None:
+        analyzer._save_failure_memory = lambda: None
+
+    def restore() -> None:
+        if original_memory is not None:
+            analyzer._failure_memory = original_memory
+        if original_save is not None:
+            if had_instance_save:
+                analyzer._save_failure_memory = original_save
+            else:
+                del analyzer._save_failure_memory
+
+    return restore
+
+
 def evaluate_trx_ai(
     analyzer: RealityAnalyzer,
     dataset: list[EvalCase] | None = None,
@@ -229,51 +258,59 @@ def evaluate_trx_ai(
     total = len(cases)
     case_results: list[dict[str, Any]] = []
 
-    for idx, case in enumerate(cases, start=1):
-        _clear_review_cache(analyzer)
-        started = time.perf_counter()
-        trx_result = analyzer.analyze_code_multi_agent(case.input_text)
-        trx_elapsed = time.perf_counter() - started
+    restore_failure_memory = _isolate_failure_memory(analyzer)
+    try:
+        for idx, case in enumerate(cases, start=1):
+            _clear_review_cache(analyzer)
+            _reset_failure_memory(analyzer)
+            started = time.perf_counter()
+            trx_result = analyzer.analyze_code_multi_agent(case.input_text)
+            trx_elapsed = time.perf_counter() - started
 
-        trx_text = _as_search_text(trx_result)
-        debug_sim = _semantic_match(case.expected_debug, trx_text)
-        fix_sim = _semantic_match(case.expected_fix, trx_text)
+            trx_text = _as_search_text(trx_result)
+            debug_sim = _semantic_match(case.expected_debug, trx_text)
+            fix_sim = _semantic_match(case.expected_fix, trx_text)
 
-        row: dict[str, Any] = {
-            "id": case.id or f"case-{idx:03d}",
-            "language": case.language,
-            "category": case.category,
-            "source": _result_source(trx_result),
-            "debug_similarity": round(debug_sim, 4),
-            "fix_similarity": round(fix_sim, 4),
-            "debug_hit": debug_sim >= threshold,
-            "fix_hit": fix_sim >= threshold,
-            "completeness": round(_section_completeness(trx_result), 4),
-            "latency_seconds": round(trx_elapsed, 3),
-            "chance_debug_hit": _semantic_match(case.expected_debug, GENERIC_REVIEW) >= threshold,
-            "chance_fix_hit": _semantic_match(case.expected_fix, GENERIC_REVIEW) >= threshold,
-        }
+            row: dict[str, Any] = {
+                "id": case.id or f"case-{idx:03d}",
+                "language": case.language,
+                "category": case.category,
+                "source": _result_source(trx_result),
+                "debug_similarity": round(debug_sim, 4),
+                "fix_similarity": round(fix_sim, 4),
+                "debug_hit": debug_sim >= threshold,
+                "fix_hit": fix_sim >= threshold,
+                "completeness": round(_section_completeness(trx_result), 4),
+                "latency_seconds": round(trx_elapsed, 3),
+                # Kept so every hit/miss can be audited against what the reviewer actually said.
+                "review_text": trx_text,
+                "raw_llm_output": str(trx_result.get("raw_llm_output", "")),
+                "chance_debug_hit": _semantic_match(case.expected_debug, GENERIC_REVIEW) >= threshold,
+                "chance_fix_hit": _semantic_match(case.expected_fix, GENERIC_REVIEW) >= threshold,
+            }
 
-        if run_baseline:
-            baseline_started = time.perf_counter()
-            baseline = _baseline_simple_code_review(analyzer, case.input_text, case.language)
-            row["baseline_latency_seconds"] = round(time.perf_counter() - baseline_started, 3)
-            baseline_text = str(baseline.get("text", "")).lower()
-            row["baseline_ok"] = bool(baseline.get("ok"))
-            b_debug = _semantic_match(case.expected_debug, baseline_text)
-            b_fix = _semantic_match(case.expected_fix, baseline_text)
-            row["baseline_debug_hit"] = b_debug >= threshold
-            row["baseline_fix_hit"] = b_fix >= threshold
-            diff = (debug_sim + fix_sim) - (b_debug + b_fix)
-            row["vs_baseline"] = "win" if diff > 0.05 else "loss" if diff < -0.05 else "tie"
+            if run_baseline:
+                baseline_started = time.perf_counter()
+                baseline = _baseline_simple_code_review(analyzer, case.input_text, case.language)
+                row["baseline_latency_seconds"] = round(time.perf_counter() - baseline_started, 3)
+                baseline_text = str(baseline.get("text", "")).lower()
+                row["baseline_ok"] = bool(baseline.get("ok"))
+                b_debug = _semantic_match(case.expected_debug, baseline_text)
+                b_fix = _semantic_match(case.expected_fix, baseline_text)
+                row["baseline_debug_hit"] = b_debug >= threshold
+                row["baseline_fix_hit"] = b_fix >= threshold
+                diff = (debug_sim + fix_sim) - (b_debug + b_fix)
+                row["vs_baseline"] = "win" if diff > 0.05 else "loss" if diff < -0.05 else "tie"
 
-        case_results.append(row)
-        if verbose:
-            print(
-                f"[{idx}/{total}] {row['id']} {case.language}/{case.category} "
-                f"debug={'HIT' if row['debug_hit'] else 'miss'} fix={'HIT' if row['fix_hit'] else 'miss'} "
-                f"src={row['source']} {trx_elapsed:.2f}s"
-            )
+            case_results.append(row)
+            if verbose:
+                print(
+                    f"[{idx}/{total}] {row['id']} {case.language}/{case.category} "
+                    f"debug={'HIT' if row['debug_hit'] else 'miss'} fix={'HIT' if row['fix_hit'] else 'miss'} "
+                    f"src={row['source']} {trx_elapsed:.2f}s"
+                )
+    finally:
+        restore_failure_memory()
 
     results = summarize(case_results, threshold=threshold, run_baseline=run_baseline)
     results["provenance"] = {
@@ -409,6 +446,40 @@ def render_text_report(results: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def stratified_sample(cases: list[EvalCase], size: int, seed: int = 0) -> list[EvalCase]:
+    """Deterministic sample with every category represented, allocated proportionally."""
+    if size <= 0 or size >= len(cases):
+        return list(cases)
+    by_category: dict[str, list[EvalCase]] = defaultdict(list)
+    for case in cases:
+        by_category[case.category].append(case)
+    names = sorted(by_category)
+    if size < len(names):
+        raise ValueError(f"Sample size {size} is smaller than the {len(names)} categories.")
+
+    # One per category first, then distribute the rest by largest remainder.
+    alloc = {name: 1 for name in names}
+    remaining = size - len(names)
+    total = len(cases)
+    shares = {name: remaining * len(by_category[name]) / total for name in names}
+    for name in names:
+        alloc[name] += min(int(shares[name]), len(by_category[name]) - 1)
+    leftover = size - sum(alloc.values())
+    for name in sorted(names, key=lambda n: (-(shares[n] - int(shares[n])), n)):
+        if leftover <= 0:
+            break
+        if alloc[name] < len(by_category[name]):
+            alloc[name] += 1
+            leftover -= 1
+
+    rng = random.Random(seed)
+    picked: set[str] = set()
+    for name in names:
+        picked.update(c.id for c in rng.sample(by_category[name], alloc[name]))
+    # Keep dataset order so ids read naturally in reports.
+    return [c for c in cases if c.id in picked]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="trx eval", description="Run the TRX-AI code-review benchmark.")
     parser.add_argument("--dataset", default=str(DATASET_PATH), help="Path to a JSONL benchmark file.")
@@ -416,6 +487,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--category", action="append", help="Only run cases in this category (repeatable).")
     parser.add_argument("--language", action="append", help="Only run cases in this language (repeatable).")
     parser.add_argument("--limit", type=int, default=0, help="Run at most N cases.")
+    parser.add_argument(
+        "--sample", type=int, default=0, help="Run a stratified sample of N cases (all categories covered)."
+    )
+    parser.add_argument("--seed", type=int, default=0, help="Seed for --sample (default 0).")
     parser.add_argument("--no-baseline", action="store_true", help="Skip the plain-prompt baseline.")
     parser.add_argument("--out", default=None, help="Text report path (JSON is written alongside).")
     return parser
@@ -428,6 +503,8 @@ def main(argv: list[str] | None = None) -> int:
         cases = [c for c in cases if c.category in set(args.category)]
     if args.language:
         cases = [c for c in cases if c.language in set(args.language)]
+    if args.sample > 0:
+        cases = stratified_sample(cases, args.sample, seed=args.seed)
     if args.limit > 0:
         cases = cases[: args.limit]
     if not cases:

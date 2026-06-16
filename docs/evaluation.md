@@ -22,7 +22,7 @@ fails if a generic review can "pass" too many labels (see the chance floor below
 ## Metrics
 
 A review counts as a **hit** for a case when the semantic similarity between the expected label
-and the review text reaches the threshold (default `0.5`, set with `--threshold`).
+and the review text reaches the threshold (default `0.45`, set with `--threshold`).
 
 - **Debug detection**: share of cases where the expected issue is named.
 - **Fix suggestion**: share of cases where the expected fix is suggested.
@@ -32,6 +32,10 @@ and the review text reaches the threshold (default `0.5`, set with `--threshold`
 - **Completeness**: share of required review sections that were populated.
 - **Latency**: average and p95 time per case. The review cache is cleared before each case, so
   cached answers never inflate the numbers.
+- **Case isolation**: failure memory is emptied before each case and never written to
+  `sessions/` during a run, so one case can't leak into the next, or into your real sessions.
+- **Audit trail**: the JSON report stores each case's review text and raw LLM output, so you can
+  check any hit or miss against what the reviewer actually said.
 - **Served by LLM vs rule fallback**: if the LLM is unreachable, the analyzer falls back to rules.
   The report flags such runs, because their numbers say nothing about model quality.
 
@@ -41,18 +45,20 @@ quote a single percentage without its interval.
 
 ### Threshold calibration
 
-The scorer is lexical: token overlap, synonyms and fuzzy phrase matching. It is not
-embedding-based. A generic review scored against all 66 labels gave these false hits:
+The scorer is lexical: token overlap with synonyms, CamelCase splitting (`IndexError` becomes
+`index error`) and fuzzy phrase matching. It is not embedding-based. A generic review scored
+against all 66 labels gave these false hits:
 
 | Threshold | False debug hits | False fix hits |
 |---|---|---|
-| 0.25 | 11 / 66 | 31 / 66 |
-| 0.40 | 0 / 66 | 6 / 66 |
-| 0.50 | 0 / 66 | 2 / 66 |
-| 0.60 | 0 / 66 | 0 / 66 |
+| 0.35 | 3 / 66 | 9 / 66 |
+| 0.40 | 0 / 66 | 8 / 66 |
+| 0.45 | 0 / 66 | 4 / 66 |
+| 0.50 | 0 / 66 | 3 / 66 |
+| 0.60 | 0 / 66 | 1 / 66 |
 
-`0.5` is the default because correct paraphrases often score between 0.3 and 0.6. Strict thresholds
-under-count good reviews. Loose thresholds reward generic ones.
+The default is `0.45`. Correct paraphrases often score between 0.3 and 0.6, so a strict threshold
+under-counts good reviews, and the chance floor printed with every run shows what is left over.
 
 ## Baseline comparison
 

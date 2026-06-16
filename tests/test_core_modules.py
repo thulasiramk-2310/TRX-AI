@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import requests
@@ -167,6 +168,84 @@ class CliEntryTests(unittest.TestCase):
         with patch("evaluation.main", return_value=0) as eval_main:
             self.assertEqual(main.main(["eval", "--limit", "2", "--no-baseline"]), 0)
         eval_main.assert_called_once_with(["--limit", "2", "--no-baseline"])
+
+
+class ReviewJsonParsingTests(unittest.TestCase):
+    """qwen3:8b often answers the review prompt as JSON keyed by the section headers."""
+
+    FIXTURE = Path(__file__).parent / "fixtures" / "qwen3_review_json_uppercase.txt"
+
+    def test_uppercase_header_keys_with_nested_lists_are_parsed(self) -> None:
+        from analyzer import RealityAnalyzer
+
+        sections = RealityAnalyzer._parse_code_review_sections(self.FIXTURE.read_text(encoding="utf-8"))
+
+        debug = " ".join(sections["code_debug"])
+        self.assertIn("incorrectly returning `arr[0]`", debug)
+        self.assertNotIn("No critical bugs", debug)
+        self.assertNotIn("['", debug)  # nested lists are flattened, not stringified
+        self.assertTrue(any("empty arrays" in item for item in sections["code_improvements"]))
+        self.assertTrue(any("ValueError" in item for item in sections["fix_suggestions"]))
+        self.assertNotIn("parsing incomplete", " ".join(sections["performance"]))
+
+    def test_fixed_code_extracted_from_nested_json(self) -> None:
+        from analyzer import RealityAnalyzer
+
+        fixed = RealityAnalyzer._extract_fixed_code(self.FIXTURE.read_text(encoding="utf-8"))
+        self.assertTrue(fixed.startswith("def find_max(arr):"))
+        self.assertIn("raise ValueError", fixed)
+
+    def test_snake_case_keys_still_work(self) -> None:
+        from analyzer import RealityAnalyzer
+
+        text = '{"code_debug": ["off by one"], "fixed_code": "x = 1", "confidence": "85%"}'
+        sections = RealityAnalyzer._parse_code_review_sections(text)
+        self.assertEqual(sections["code_debug"], ["off by one"])
+        self.assertEqual(sections["confidence_score"], 85)
+        self.assertEqual(RealityAnalyzer._extract_fixed_code(text), "x = 1")
+
+
+class ReviewFormatDriftTests(unittest.TestCase):
+    """Real qwen3:8b answers that the parser used to drop entirely (eval run 2026-10-01)."""
+
+    FIXTURES = Path(__file__).parent / "fixtures"
+
+    def _sections(self, name: str) -> dict:
+        from analyzer import RealityAnalyzer
+
+        return RealityAnalyzer._parse_code_review_sections((self.FIXTURES / name).read_text(encoding="utf-8"))
+
+    def test_json_with_raw_newlines_in_strings(self) -> None:
+        sections = self._sections("qwen3_review_json_control_chars.txt")
+        self.assertIn("sql injection", " ".join(sections["code_debug"]).lower())
+
+    def test_review_wrapped_in_plaintext_fence(self) -> None:
+        sections = self._sections("qwen3_review_plaintext_fence.txt")
+        self.assertIn("memory leak", " ".join(sections["code_debug"]).lower())
+        self.assertTrue(any("free" in item.lower() for item in sections["code_improvements"]))
+
+    def test_review_wrapped_in_yaml_fence(self) -> None:
+        sections = self._sections("qwen3_review_yaml_fence.txt")
+        self.assertIn("out of bounds", " ".join(sections["code_debug"]).lower())
+
+    def test_code_fences_are_still_ignored(self) -> None:
+        from analyzer import RealityAnalyzer
+
+        text = "CODE DEBUG:\n- real issue\n```python\nCODE DEBUG:\nx = 1\n```\n"
+        sections = RealityAnalyzer._parse_code_review_sections(text)
+        self.assertEqual(sections["code_debug"], ["real issue"])
+
+class SemanticScorerRegressionTests(unittest.TestCase):
+    def test_synonyms_do_not_penalize_label(self) -> None:
+        from semantic_scoring import SemanticMatcher
+
+        text = "No error handling is present for empty array input, which would cause an IndexError at line 2."
+        self.assertGreaterEqual(SemanticMatcher().score("empty list index error", text), 0.45)
+
+    def test_camel_case_identifiers_are_split(self) -> None:
+        from semantic_scoring import _normalize_text
+
+        self.assertEqual(_normalize_text("raises IndexError"), "raises index error")
 
 
 if __name__ == "__main__":

@@ -1,25 +1,71 @@
-﻿"""Futuristic dashboard formatting utilities for TRX-AI outputs."""
+﻿"""Transcript-style output rendering for TRX-AI (Rich)."""
 
 from __future__ import annotations
 
 import difflib
 import re
-import time
 from typing import Any
 
-from rich.box import ROUNDED
-from rich.console import Console
-from rich.markup import escape
+from rich.console import Console, Group
 from rich.markdown import Markdown
-from rich.panel import Panel
+from rich.padding import Padding
+from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
-from personality import personality_meta
+from guardrails import strip_terminal_controls
+from personality import personality_meta  # noqa: F401 - kept for callers importing it from here
+
+# Neon HUD palette: cyan/violet/magenta chrome, semantic colours for findings.
+THEME = {
+    "accent": "#22d3ee",   # neon cyan: glyphs, prompt, headings
+    "accent2": "#a78bfa",  # violet
+    "accent3": "#f472b6",  # magenta
+    "text": "#e2e8f0",
+    "muted": "#64748b",
+    "border": "#334155",
+    "chip": "on #0f172a",  # dark pill background for status chips
+    "bug": "#fb7185",
+    "fix": "#34d399",
+    "perf": "#fbbf24",
+    "note": "#60a5fa",
+    "code": "#7dd3fc",
+}
+CODE_THEME = "monokai"
+GRADIENT = ("#22d3ee", "#38bdf8", "#818cf8", "#a78bfa", "#c084fc", "#f472b6")
+
+
+def gradient_text(text: str, *, bold: bool = True, colors: tuple[str, ...] = GRADIENT) -> Text:
+    """Colours each character along a cyan -> violet -> magenta ramp (static, printed once)."""
+    out = Text()
+    visible = max(1, len(text) - 1)
+    for i, ch in enumerate(text):
+        color = colors[min(len(colors) - 1, round(i / visible * (len(colors) - 1)))]
+        out.append(ch, style=f"bold {color}" if bold else color)
+    return out
+
+# How each analysis_source is shown in the meta line under an answer.
+SOURCE_LABELS = {
+    "llm": "llm",
+    "rule-fallback": "rule fallback (LLM unavailable)",
+    "rule-fastpath": "built-in",
+    "rule": "rule-based",
+    "knowledge-base": "built-in knowledge",
+}
+
+_GRAPH_PREFIXES = ("impacted module:", "call relation:", "dependency chain:", "graph:")
+
+
+# Spaces Rich pads lines with, optionally followed by trailing colour-reset codes.
+_TRAILING_WS = re.compile(r"[ \t]+((?:\x1b\[[0-9;]*m)*)$", re.MULTILINE)
+
+
+def _is_graph_line(text: str) -> bool:
+    return str(text).strip().lower().startswith(_GRAPH_PREFIXES)
 
 
 class OutputFormatter:
-    """Renders a futuristic multi-panel dashboard for chat and analysis responses."""
+    """Renders chat replies and code reviews as compact cards in a scrolling transcript."""
 
     def __init__(
         self,
@@ -188,13 +234,6 @@ class OutputFormatter:
         encoding = str(getattr(stream, "encoding", "") or "").lower()
         return "utf" in encoding
 
-    def _progress_bar(self, percent: int, width: int = 26) -> str:
-        clamped = max(0, min(100, int(percent)))
-        filled = int((clamped / 100.0) * width)
-        if self._supports_utf8():
-            return "[" + ("█" * filled) + ("░" * (width - filled)) + "]"
-        return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
-
     @staticmethod
     def _markdown_from_items(items: list[str], fallback: str, *, limit: int = 6) -> str:
         cleaned: list[str] = []
@@ -283,15 +322,6 @@ class OutputFormatter:
 
         return collected
 
-    def _smooth_print(self, renderable: Any) -> None:
-        try:
-            self.console.print(renderable)
-        except UnicodeEncodeError:
-            safe_text = self._renderable_to_safe_text(renderable)
-            self.console.print(safe_text)
-        if self.ui_transitions:
-            time.sleep(max(0.04, min(0.18, self.ui_transition_delay / 2.5)))
-
     def _renderable_to_safe_text(self, renderable: Any) -> str:
         with self.console.capture() as capture:
             self.console.print(renderable)
@@ -300,300 +330,285 @@ class OutputFormatter:
         encoding = getattr(stream, "encoding", None) or "utf-8"
         return rendered.encode(encoding, errors="replace").decode(encoding, errors="replace")
 
-    def _build_modules_panel(self, analysis: dict[str, Any]) -> Panel:
-        active = {
-            str(item).strip().lower()
-            for item in analysis.get("active_agents", [])
-            if str(item).strip()
-        }
-        current_input = str(analysis.get("current_input", "")).strip().lower()
-        statuses = [str(item).lower() for item in analysis.get("system_status", [])]
-        intent = str(analysis.get("intent", "")).lower()
-        is_review_flow = (
-            intent == "review"
-            or current_input.startswith("review ")
-            or current_input.startswith("fix ")
-            or any("intent=review" in item for item in statuses)
-            or bool(str(analysis.get("fixed_code", "")).strip())
-        )
+    # ------------------------------------------------------------------ transcript UI
 
-        rows = [
-            ("[D]", "Debug Agent", ("debug" in active) or is_review_flow),
-            ("[I]", "Improve Agent", ("improve" in active) or is_review_flow),
-            ("[P]", "Predict Agent", ("predict" in active) or is_review_flow),
-            ("[R]", "Review Agent", ("review" in active) or is_review_flow),
-        ]
+    def _glyphs(self) -> dict[str, str]:
+        """Unicode glyphs where the terminal can encode them, ASCII otherwise (e.g. cp1252)."""
+        stream = getattr(self.console, "file", None)
+        encoding = str(getattr(stream, "encoding", "") or "utf-8")
+        # Single-width glyphs only: emoji like ⚡ are double-width in some terminals and break alignment.
+        fancy = {"dot": "◈", "bug": "✗", "fix": "✓", "perf": "↯", "note": "→", "sep": "·",
+                 "hud_l": "◢", "hud_r": "◣", "arrow": "▸", "rule": "─", "on": "▰", "off": "▱"}
+        try:
+            "".join(fancy.values()).encode(encoding)
+            return fancy
+        except (LookupError, UnicodeEncodeError):
+            return {"dot": "*", "bug": "x", "fix": "+", "perf": "!", "note": ">", "sep": "|",
+                    "hud_l": "/", "hud_r": "\\", "arrow": ">", "rule": "-", "on": "#", "off": "."}
 
-        modules = Table.grid(expand=True)
-        modules.add_column(ratio=1)
-        for icon, label, is_active in rows:
-            status = "[bright_cyan]ACTIVE[/bright_cyan]" if is_active else "[dim]IDLE[/dim]"
-            border = "dark_orange3" if is_active else "#5f4b8b"
-            glow_dot = "[bright_cyan]*[/bright_cyan]" if is_active else "[dim].[/dim]"
-            item = Table.grid(expand=True)
-            item.add_column(ratio=1)
-            item.add_column(width=3, justify="right")
-            item.add_row(f"{icon} [bold]{label}[/bold]\n{status}", glow_dot)
-            modules.add_row(
-                Panel(
-                    item,
-                    border_style=border,
-                    box=ROUNDED,
-                    padding=(0, 1),
-                    style="on #130d1f",
-                )
-            )
+    def _hud_width(self) -> int:
+        # Capped so rules don't re-wrap into a mess when the window is narrowed later.
+        return max(40, min(self.console.width, 96))
 
-        return Panel(
-            modules,
-            title="[bold #ffb266]TRX-AI MODULES[/bold #ffb266]",
-            border_style="#ff8c42",
-            box=ROUNDED,
-            style="on #0f0818",
-            padding=(1, 1),
-        )
+    def _confidence_bar(self, score: int, cells: int = 10) -> Text:
+        g = self._glyphs()
+        filled = max(0, min(cells, round(score / 100 * cells)))
+        bar = gradient_text(g["on"] * filled, bold=False)
+        bar.append(g["off"] * (cells - filled), style=THEME["border"])
+        bar.append(f" {score}%", style=f"bold {THEME['text']}")
+        return bar
 
-    def _build_analysis_panel(self, analysis: dict[str, Any]) -> Panel:
-        if analysis.get("response_mode") != "analysis":
-            chat_response = str(analysis.get("chat_response", "I am here to help.")).strip()
-            if not chat_response:
-                chat_response = "I am here to help."
-            confidence_label = "High" if analysis.get("analysis_source") == "llm" else "Medium"
-            personality = str(analysis.get("personality", "friendly"))
-            pmeta = personality_meta(personality)
-            branded = (
-                "[TRX RESPONSE]\n\n"
-                f"{pmeta['prefix']} Response:\n"
-                f"{chat_response}\n\n"
-                "Insight:\n"
-                "Ask follow-up questions for deeper detail.\n\n"
-                f"Confidence: {confidence_label}"
-            )
+    def _hud_rule(self, label: str, subject: str = "", right: Text | None = None) -> Text:
+        """`◢ LABEL ▸ subject ───────── right ◣` — the HUD header used above every answer."""
+        g = self._glyphs()
+        line = Text.assemble((f"{g['hud_l']} ", THEME["accent"]))
+        line.append_text(gradient_text(label))
+        if subject:
+            line.append(f" {g['arrow']} ", style=THEME["accent2"])
+            line.append(subject, style=f"bold {THEME['text']}")
+        tail = Text(" ")
+        if right is not None:
+            tail.append_text(right)
+            tail.append(" ")
+        tail.append(g["hud_r"], style=THEME["accent3"])
+        fill = self._hud_width() - line.cell_len - tail.cell_len - 1
+        if fill > 2:
+            line.append(" " + g["rule"] * fill, style=THEME["border"])
+        line.append_text(tail)
+        return line
 
-            body = Table.grid(expand=True)
-            body.add_column(ratio=1)
-            body.add_row(
-                Panel(
-                    Markdown(branded, code_theme="monokai"),
-                    title="[bold]TRX RESPONSE[/bold]",
-                    border_style="#7dd3fc",
-                    box=ROUNDED,
-                    style="on #102030",
-                    padding=(0, 1),
-                )
-            )
-            body.add_row(
-                Panel(
-                    Markdown("- Ask a follow-up for deeper detail or examples.", code_theme="monokai"),
-                    title="[bold]NEXT STEP[/bold]",
-                    border_style="#c084fc",
-                    box=ROUNDED,
-                    style="on #1d1330",
-                    padding=(0, 1),
-                )
-            )
+    def _section_header(self, label: str, color: str, count: int | None = None) -> Text:
+        head = Text.assemble((f"  {self._glyphs()['arrow']} ", THEME["accent2"]), (label.upper(), f"bold {color}"))
+        if count and count > 1:
+            head.append(f"  {count}", style=THEME["muted"])
+        return head
 
-            return Panel(
-                body,
-                title="[bold #d8b4fe]ANALYSIS OUTPUT[/bold #d8b4fe]",
-                border_style="#8b5cf6",
-                box=ROUNDED,
-                style="on #0c0716",
-                padding=(1, 1),
-            )
+    def _meta_line(self, analysis: dict[str, Any], extra: list[str] | None = None) -> Text:
+        sep = f" {self._glyphs()['sep']} "
+        parts: list[str] = []
+        model = str(analysis.get("model_name", "")).strip()
+        if model:
+            parts.append(model)
+        elapsed = analysis.get("elapsed_seconds")
+        if isinstance(elapsed, (int, float)) and elapsed >= 0.05:
+            parts.append(f"{elapsed:.1f}s")
+        source = str(analysis.get("analysis_source", "")).strip().lower()
+        statuses = [str(s).lower() for s in analysis.get("system_status", [])]
+        if any("rule-fallback" in s or s == "llm_unavailable" for s in statuses):
+            source = "rule-fallback"
+        label = SOURCE_LABELS.get(source, source)
+        if label:
+            parts.append(label)
+        if "cache_hit" in statuses:
+            parts.append("cached")
+        parts.extend(extra or [])
+        if not parts:
+            return Text("")
+        # Status "chip": a dark pill behind the meta text.
+        return Text.assemble(("  ", ""), (self._glyphs()["dot"] + " ", THEME["accent"]),
+                             (f" {sep.join(parts)} ", f"{THEME['muted']} {THEME['chip']}"))
 
+    @staticmethod
+    def _inline(text: str) -> Text:
+        """Light inline formatting: `code` and **bold**, without Markdown's heavy code blocks."""
+        clean = re.sub(r"\s+", " ", strip_terminal_controls(str(text))).strip()
+        clean = re.sub(r"^(?:[-*•]\s+|\d+[.)]\s+)", "", clean)
+        out = Text()
+        for token in re.split(r"(`[^`]+`|\*\*[^*]+\*\*)", clean):
+            if not token:
+                continue
+            if token.startswith("`") and token.endswith("`") and len(token) > 1:
+                out.append(token[1:-1], style=THEME["code"])
+            elif token.startswith("**") and token.endswith("**") and len(token) > 3:
+                out.append(token[2:-2], style=f"bold {THEME['text']}")
+            else:
+                out.append(token, style=THEME["text"])
+        return out
+
+    def _print(self, renderable: Any) -> None:
+        """Renders once, strips Rich's padding to the terminal width, and writes the block in one go.
+
+        Trailing spaces end up in copied text and turn into blank wrapped lines when the window is
+        resized; writing each block once (no live redraws) keeps the terminal's own scrollback stable.
+        """
+        with self.console.capture() as capture:
+            self.console.print(renderable)
+        rendered = _TRAILING_WS.sub(r"\1", capture.get()).rstrip("\n")
+        # Make the text encodable *before* writing: if Rich hits a UnicodeEncodeError mid-write it
+        # keeps the failed text buffered, and every later print fails on it again.
+        encoding = str(getattr(getattr(self.console, "file", None), "encoding", None) or "utf-8")
+        try:
+            rendered.encode(encoding)
+        except (LookupError, UnicodeEncodeError):
+            rendered = rendered.encode(encoding, errors="replace").decode(encoding, errors="replace")
+        self.console.print(Text.from_ansi(rendered) if rendered else Text(""), soft_wrap=True)
+
+    def _render_chat(self, analysis: dict[str, Any]) -> None:
+        g = self._glyphs()
+        # Model text never reaches the terminal raw: no escape sequences (screen clear, title, clipboard).
+        reply = strip_terminal_controls(str(analysis.get("chat_response", ""))).strip() or "I am here to help."
+        row = Table.grid(padding=(0, 1))
+        row.add_column(width=1, no_wrap=True)
+        row.add_column(ratio=1)
+        row.add_row(gradient_text(g["dot"]), Markdown(reply, code_theme=CODE_THEME))
+        self._print(Group(Text(""), row, Text(""), self._meta_line(analysis)))
+
+    def _review_sections(self, analysis: dict[str, Any]) -> list[tuple[str, str, str, list[str]]]:
         raw_output = str(analysis.get("raw_llm_output", "")).strip()
 
-        debug_items = self._section_items(analysis, "debug_analysis", "No debug issues detected.")
-        if self._is_placeholder_items(debug_items, {"No critical bugs were explicitly identified.", "No debug issues detected."}):
-            extracted = self._extract_raw_section(raw_output, ["CODE DEBUG", "DEBUG ANALYSIS"], max_items=8)
-            if extracted:
-                debug_items = extracted
+        def pick(key: str, placeholders: set[str], headers: list[str], limit: int) -> list[str]:
+            # Graph lines ("Impacted module: ...") are context, not findings; they get their own line.
+            items = [i for i in self._section_items(analysis, key, "") if i and not _is_graph_line(i)]
+            if self._is_placeholder_items(items, placeholders):
+                items = self._extract_raw_section(raw_output, headers, max_items=limit) or []
+            return items[:limit]
 
-        improve_items = self._section_items(analysis, "improvements", "No improvement suggestions yet.")
-        if self._is_placeholder_items(improve_items, {"Apply incremental refactoring for readability and maintainability.", "No improvement suggestions yet."}):
-            extracted = self._extract_raw_section(raw_output, ["CODE IMPROVEMENTS", "IMPROVEMENTS", "SECURITY"], max_items=8)
-            if extracted:
-                improve_items = extracted
-
-        performance_items = self._section_items(analysis, "predictions", "No performance insights yet.")
-        if self._is_placeholder_items(performance_items, {"LLM output parsing incomplete - check raw output", "No performance insights yet."}):
-            extracted = self._extract_raw_section(raw_output, ["PERFORMANCE"], max_items=8)
-            if extracted:
-                performance_items = extracted
-
-        summary_items = self._section_items(analysis, "final_insight", "Prioritize one high-impact fix first.")
-        if self._is_placeholder_items(summary_items, {"Prioritize correctness issues first, then refactor and optimize.", "Prioritize one high-impact fix first."}):
-            extracted = self._extract_raw_section(raw_output, ["FINAL SUMMARY"], max_items=4)
-            if extracted:
-                summary_items = extracted
-
-        section_rows = [
-            ("DEBUG", debug_items, "#ff6b6b", "#2a0d14"),
-            ("IMPROVEMENTS", improve_items, "#c084fc", "#1d1330"),
-            ("PERFORMANCE / PREDICTIONS", performance_items, "#7dd3fc", "#102030"),
-            ("SUMMARY", summary_items, "#ffb266", "#2b1b12"),
+        g = self._glyphs()
+        return [
+            ("Issues", g["bug"], THEME["bug"], pick(
+                "debug_analysis",
+                {"No critical bugs were explicitly identified.", "No debug issues detected."},
+                ["CODE DEBUG", "DEBUG ANALYSIS"], 6)),
+            ("Fixes", g["fix"], THEME["fix"], pick(
+                "improvements",
+                {"Apply incremental refactoring for readability and maintainability."},
+                ["CODE IMPROVEMENTS", "IMPROVEMENTS", "FIX SUGGESTIONS"], 6)),
+            ("Performance", g["perf"], THEME["perf"], pick(
+                "predictions",
+                {"LLM output parsing incomplete - check raw output"},
+                ["PERFORMANCE"], 4)),
+            ("Summary", g["note"], THEME["note"], pick(
+                "final_insight",
+                {"Prioritize correctness issues first, then refactor and optimize."},
+                ["FINAL SUMMARY"], 3)),
         ]
 
-        body = Table.grid(expand=True)
-        body.add_column(ratio=1)
-        for title, items, border, bg in section_rows:
-            md_text = self._markdown_from_items(items, "No data available.", limit=6)
-            block = Panel(
-                Markdown(md_text, code_theme="monokai"),
-                title=f"[bold]{title}[/bold]",
-                border_style=border,
-                box=ROUNDED,
-                style=f"on {bg}",
-                padding=(0, 1),
-            )
-            body.add_row(block)
+    @staticmethod
+    def _language_from_input(analysis: dict[str, Any]) -> str:
+        target = str(analysis.get("current_input", "")).lower()
+        for ext, lang in ((".py", "python"), (".js", "javascript"), (".ts", "typescript"), (".java", "java"),
+                          (".go", "go"), (".cpp", "cpp"), (".c", "c"), (".sql", "sql"), (".rs", "rust")):
+            if re.search(re.escape(ext) + r"\b", target):
+                return lang
+        return "python"
 
-        return Panel(
-            body,
-            title="[bold #d8b4fe]ANALYSIS OUTPUT[/bold #d8b4fe]",
-            border_style="#8b5cf6",
-            box=ROUNDED,
-            style="on #0c0716",
-            padding=(1, 1),
-        )
+    @staticmethod
+    def _review_title(analysis: dict[str, Any]) -> str:
+        target = str(analysis.get("current_input", "")).strip()
+        for prefix in ("review ", "fix ", "analyze "):
+            if target.lower().startswith(prefix):
+                return f"{prefix.strip().capitalize()} {target[len(prefix):].strip()}"
+        return "Code review"
 
-    def _build_input_results_panel(self, analysis: dict[str, Any]) -> Panel:
-        raw_input = str(analysis.get("current_input", "")).strip()
-        if not raw_input:
-            raw_input = "Enter problem or code..."
+    def _render_review(self, analysis: dict[str, Any]) -> None:
+        """Borderless review: a header line, then one short section per finding type.
 
-        preview_lines = []
-        if analysis.get("response_mode") != "analysis":
-            chat_preview = str(analysis.get("chat_response", "")).strip()
-            if chat_preview:
-                preview_lines.append(chat_preview)
-        for section in ("debug_analysis", "improvements", "predictions", "final_insight"):
-            values = analysis.get(section, [])
-            if isinstance(values, list):
-                preview_lines.extend(str(v).strip() for v in values if str(v).strip())
-            elif isinstance(values, str) and values.strip():
-                preview_lines.append(values.strip())
+        No box-drawing characters, so selecting and copying the text gives clean text.
+        """
+        g = self._glyphs()
+        title = self._review_title(analysis)
+        verb, _, subject = ("Review", "", "") if title == "Code review" else title.partition(" ")
+        score = analysis.get("confidence_score")
+        bar = self._confidence_bar(int(score)) if isinstance(score, (int, float)) and score else None
+        header = self._hud_rule(verb.upper(), subject, bar)
 
-        if not preview_lines:
-            raw_output = str(analysis.get("raw_llm_output", "")).strip()
-            preview_lines = self._extract_raw_section(
-                raw_output,
-                ["CODE DEBUG", "CODE IMPROVEMENTS", "PERFORMANCE", "FINAL SUMMARY"],
-                max_items=3,
-            )
-        preview = preview_lines[:3] if preview_lines else ["No analysis preview available yet."]
-        recent = [str(item) for item in analysis.get("system_status", [])[:4]]
-        if not recent:
-            recent = ["Run a review or fix command to populate recent analyses."]
+        sections = [s for s in self._review_sections(analysis) if s[3]]
+        blocks: list[Any] = [Text(""), header]
+        for label, icon, color, items in sections:
+            blocks += [Text(""), self._section_header(label, color, len(items))]
+            # Grid gives a hanging indent: wrapped lines line up with the text, not the icon.
+            grid = Table.grid(padding=(0, 1))
+            grid.add_column(width=5, no_wrap=True)
+            grid.add_column()
+            for item in items:
+                grid.add_row(Text(f"    {icon}", style=color), self._inline(item))
+            blocks.append(grid)
+        if not sections:
+            blocks += [Text(""), Text(f"  {g['fix']} No issues found.", style=THEME["fix"])]
+        self._print(Group(*blocks))
 
-        content = Table.grid(expand=True)
-        content.add_column(ratio=1)
+        self._render_fix(analysis)
+        self.render_guardrails(analysis.get("guardrails") or [])
+        context = self._graph_context_summary(analysis)
+        self._print(Text(""))
+        self._print(self._meta_line(analysis, [context] if context else None))
 
-        input_box = Panel(
-            Text(f"{raw_input[:90]}", style="white"),
-            title="[bold #7dd3fc]INPUT[/bold #7dd3fc]",
-            border_style="#22d3ee",
-            box=ROUNDED,
-            style="on #0f1a22",
-            padding=(0, 1),
-        )
-        preview_box = Panel(
-            Markdown(self._markdown_from_items(preview, "No results yet.", limit=3), code_theme="monokai"),
-            title="[bold #ffb266]Results Preview[/bold #ffb266]",
-            border_style="#f59e0b",
-            box=ROUNDED,
-            style="on #22160d",
-            padding=(0, 1),
-        )
-        recent_box = Panel(
-            Markdown(self._markdown_from_items(recent, "No history entries.", limit=4), code_theme="monokai"),
-            title="[bold #d8b4fe]Recent Analyses[/bold #d8b4fe]",
-            border_style="#a78bfa",
-            box=ROUNDED,
-            style="on #18112a",
-            padding=(0, 1),
-        )
+    @staticmethod
+    def _strip_file_header(code: str) -> str:
+        # The reviewer prefixes fixes with "# FILE: name"; it isn't part of the change.
+        return re.sub(r"^\s*(#|//|--)\s*FILE:[^\n]*\n", "", code, count=1)
 
-        content.add_row(input_box)
-        content.add_row(preview_box)
-        content.add_row(recent_box)
+    def _render_fix(self, analysis: dict[str, Any]) -> None:
+        fixed = self._strip_file_header(strip_terminal_controls(str(analysis.get("fixed_code", "")))).strip("\n")
+        if not fixed.strip():
+            return
+        original = self._strip_file_header(str(analysis.get("original_code", ""))).strip("\n")
+        language = str(analysis.get("language", "") or self._language_from_input(analysis))
 
-        return Panel(
-            content,
-            title="[bold #93c5fd]INPUT & RESULTS[/bold #93c5fd]",
-            border_style="#38bdf8",
-            box=ROUNDED,
-            style="on #0b1019",
-            padding=(1, 1),
-        )
+        if original:
+            old_lines = [line.rstrip() for line in original.splitlines()]
+            new_lines = [line.rstrip() for line in fixed.splitlines()]
+            if old_lines == new_lines:
+                self._print(Text(""))
+                self._print(Text(f"  {self._glyphs()['fix']} no code changes suggested", style=THEME["muted"]))
+                return
+            diff = list(difflib.unified_diff(old_lines, new_lines, lineterm="", n=2))[2:]  # drop ---/+++ headers
+            diff = [d for d in diff if not d.startswith("@@")]  # hunk headers are noise for a reader
+            added = sum(1 for d in diff if d.startswith("+"))
+            removed = sum(1 for d in diff if d.startswith("-"))
+            body: Any = Syntax("\n".join(diff), "diff", theme=CODE_THEME, background_color="default")
+            title = self._section_header("Suggested change", THEME["fix"])
+            title.append(f"  +{added} ", style=f"bold {THEME['fix']}")
+            title.append(f"-{removed}", style=f"bold {THEME['bug']}")
+        else:
+            # No line numbers: the fix should copy-paste straight into an editor.
+            body = Syntax(fixed, language, theme=CODE_THEME, background_color="default")
+            title = self._section_header("Suggested fix", THEME["fix"])
 
-    def _build_status_bar(self, analysis: dict[str, Any], mode: str, total_runs: int | None) -> Panel:
-        model_name = str(analysis.get("model_name", "qwen3:8b"))
-        score = int(analysis.get("confidence_score", int(float(analysis.get("intent_confidence", 0.8)) * 100)))
-        run_label = total_runs if total_runs is not None else "-"
-        score_bar = escape(self._progress_bar(score, width=12))
+        self._print(Group(Text(""), title, Padding(body, (0, 0, 0, 4))))
 
-        status = Table.grid(expand=True)
-        status.add_column(ratio=1)
-        status.add_column(ratio=1)
-        status.add_column(ratio=1)
-        status.add_column(ratio=1)
-        status.add_row(
-            f"[bold]Run:[/bold] {run_label}",
-            f"[bold]Model:[/bold] {model_name[:14]}",
-            f"[bold]Mode:[/bold] {mode}",
-            f"[bold]Score:[/bold] {score}% [bright_cyan]{score_bar}[/bright_cyan]",
-        )
+    def render_guardrails(self, findings: list[Any]) -> None:
+        """`▸ GUARDRAILS` section. Accepts guardrails.Finding objects or (level, message) pairs."""
+        rows = []
+        for item in findings:
+            level, message = (item.level, item.message) if hasattr(item, "level") else (item[0], item[1])
+            rows.append((str(level), str(message)))
+        if not rows:
+            return
+        blocking = any(level == "block" for level, _ in rows)
+        g = self._glyphs()
+        grid = Table.grid(padding=(0, 1))
+        grid.add_column(width=5, no_wrap=True)
+        grid.add_column()
+        for level, message in rows:
+            icon, color = (g["bug"], THEME["bug"]) if level == "block" else ("!", THEME["perf"])
+            grid.add_row(Text(f"    {icon}", style=f"bold {color}"), self._inline(message))
+        header = self._section_header("Guardrails", THEME["bug"] if blocking else THEME["perf"], len(rows))
+        header.append("  blocked" if blocking else "  warning", style=f"bold {THEME['bug'] if blocking else THEME['perf']}")
+        self._print(Group(Text(""), header, grid))
 
-        return Panel(
-            status,
-            title="[bold #86efac]SYSTEM STATUS[/bold #86efac]",
-            border_style="#22c55e",
-            box=ROUNDED,
-            style="on #0b1611",
-            padding=(0, 1),
-        )
+    def _graph_context_summary(self, analysis: dict[str, Any]) -> str:
+        lines = [
+            str(item)
+            for key in ("debug_analysis", "improvements", "predictions", "final_insight")
+            for item in (analysis.get(key) or [])
+            if _is_graph_line(str(item))
+        ]
+        if not lines:
+            return ""
+        modules = sum(1 for line in lines if line.lower().startswith("impacted module"))
+        calls = sum(1 for line in lines if line.lower().startswith("call relation"))
+        bits = [f"{modules} related module{'s' if modules != 1 else ''}"] if modules else []
+        if calls:
+            bits.append(f"{calls} call{'s' if calls != 1 else ''}")
+        return "graph: " + ", ".join(bits) if bits else "graph context"
 
     def render(self, analysis: dict[str, Any], mode: str, total_runs: int | None = None) -> None:
-        if not analysis.get("current_input"):
-            analysis["current_input"] = "Enter problem or code..."
-
-        width = self.console.size.width
-        modules = self._build_modules_panel(analysis)
-        analysis_panel = self._build_analysis_panel(analysis)
-        input_results = self._build_input_results_panel(analysis)
-
-        grid = Table.grid(expand=True)
-        if width < 110:
-            # Compact stacked layout for narrow terminals.
-            grid.add_column(ratio=1)
-            if width >= 85:
-                grid.add_row(modules)
-            grid.add_row(analysis_panel)
-            grid.add_row(input_results)
+        """Prints one answer into the scrolling transcript (never clears the screen)."""
+        if analysis.get("response_mode") == "analysis":
+            self._render_review(analysis)
         else:
-            # Wide layout with three columns.
-            grid.add_column(ratio=24)
-            grid.add_column(ratio=46)
-            grid.add_column(ratio=30)
-            grid.add_row(modules, analysis_panel, input_results)
-
-        shell = Panel(
-            grid,
-            title="[bold #f8fafc]TRX-AI Futuristic Developer Dashboard[/bold #f8fafc]",
-            subtitle="[dim]Neon Glass Interface[/dim]",
-            border_style="#7c3aed",
-            box=ROUNDED,
-            style="on #07050d",
-            padding=(1, 1),
-            expand=True,
-        )
-
-        # Redraw dashboard cleanly so prompt interaction doesn't keep pushing prior frames upward.
-        self.console.clear()
-        self._smooth_print(shell)
-        self._smooth_print(self._build_status_bar(analysis, mode, total_runs))
+            self._render_chat(analysis)
 
     def render_help_dashboard(
         self,
@@ -603,44 +618,40 @@ class OutputFormatter:
         model_name: str,
         active_agents: list[str],
     ) -> None:
-        help_payload = {
-            "response_mode": "analysis",
-            "intent": "help",
-            "current_input": "help",
-            "model_name": model_name,
-            "active_agents": active_agents,
-            "debug_analysis": [
-                "help -> Show this command guide. Example: help",
-                "history -> List previous prompts. Example: history",
-                "save <path> -> Save session history JSON. Example: save sessions/my_run.json",
-                "export <file> -> Export latest analysis report (.txt/.pdf). Example: export review_report.pdf",
-                "export compare <file> -> Compare last two analyses in PDF. Example: export compare run_diff.pdf",
-            ],
-            "improvements": [
-                "review <file|folder> -> Run code review. Example: review examples/dsa_test.py",
-                "fix <file> -> Generate fixed code with preview + confirm (y/n). Example: fix examples/demo.py",
-                "watch <folder> -> Auto-review changes in supported code files. Example: watch .",
-                "agents all | agents debug improve predict -> Control agent modules. Example: agents all",
-            ],
-            "predictions": [
-                "mode debug|optimize|predict -> Change analysis profile. Example: mode optimize",
-                "Model in use: " + model_name,
-                "Supported exit commands: exit, quit, or Ctrl+C",
-                "Best flow: review file -> inspect output -> fix file -> export report",
-            ],
-            "final_insight": [
-                "Quick Start 1: review examples/dsa_test.py",
-                "Quick Start 2: fix examples/dsa_test.py",
-                "Quick Start 3: export report.pdf",
-                "Tip: Keep review targets focused (single file) for higher quality fixes",
-            ],
-            "system_status": [
-                "help_view",
-                "source=local_commands",
-                "ui=dashboard",
-                "loader=enabled",
-                f"model={model_name}",
-            ],
-            "confidence_score": 100,
-        }
-        self.render(help_payload, mode=mode, total_runs=total_runs)
+        fancy = self._glyphs()["dot"] != "*"
+        groups = [
+            ("Code", [
+                ("review <file|folder>", "multi-agent code review"),
+                ("fix <file>", "generate a fixed copy, preview, confirm"),
+                ("watch <folder>", "re-review files on every save"),
+                ("explain \"<question>\"", "ask a general question"),
+            ]),
+            ("Session", [
+                ("history", "previous inputs"),
+                ("save <path>", "save session JSON"),
+                ("export <file>", "export last analysis (.txt / .pdf)"),
+                ("export compare <file>", "compare last two analyses (PDF)"),
+            ]),
+            ("Settings", [
+                ("chat | code | auto", "routing mode"),
+                ("mode debug|optimize|predict", "fallback profile"),
+                ("personality list|set|add|delete", "assistant voice"),
+                ("agents all | agents debug improve predict", "active agents"),
+                ("status", "runtime status"),
+                ("exit", "quit (or Ctrl+D)"),
+            ]),
+            ("Keys", [
+                ("/command", "every command also works with a slash"),
+                ("Tab  ↑  →" if fancy else "Tab  Up  Right", "complete, history, accept suggestion"),
+            ]),
+        ]
+        table = Table.grid(padding=(0, 3))
+        table.add_column(no_wrap=True)
+        table.add_column(style=THEME["muted"])
+        for i, (title, rows) in enumerate(groups):
+            if i:
+                table.add_row("", "")
+            table.add_row(self._section_header(title, THEME["accent"]), "")
+            for cmd, desc in rows:
+                table.add_row(Text(f"    {cmd}", style=THEME["code"]), desc)
+        self._print(Group(Text(""), self._hud_rule("COMMANDS", model_name), Text(""), table))

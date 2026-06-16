@@ -128,6 +128,29 @@ python smoke_e2e.py --disable-llm
 - `python smoke_e2e.py --disable-llm` - Emit JSON pass/fail matrix report
 - `exit | quit` - Close CLI
 
+Every command also works with a slash, e.g. `/review app.py` or `/help`.
+
+### Interactive prompt
+
+On a real terminal, the prompt uses [prompt_toolkit](https://python-prompt-toolkit.readthedocs.io/):
+
+- **Tab** completes commands, sub-commands (`mode o` → `optimize`), and file paths after `review`, `fix`, `watch`.
+- **Up/Down** recall earlier inputs. History is saved to `sessions/cli_history.txt`, so it survives restarts.
+- **Grey suggestions** appear as you type, based on history. Press **→** to accept one.
+- **Status** sits dimmed at the right edge of the prompt line: model, mode, and how long the last answer took. There is no toolbar and no reserved space, so the screen doesn't jump.
+- **Ctrl+D** exits. Pasting multi-line code works.
+
+When input is piped (scripts, CI), TRX falls back to a plain prompt automatically.
+
+### Output
+
+Answers print into a scrolling transcript; the screen is never cleared.
+
+- **Chat answers** render as Markdown, followed by one muted line: model · time · source (`llm`, `built-in knowledge`, or `rule fallback`).
+- **Code reviews** render as plain sections (Issues / Fixes / Performance / Summary) with a confidence score. There are no boxes, so copied text stays clean. See [docs/ui.md](docs/ui.md) for the design rules and the user feedback behind them, and [docs/guardrails.md](docs/guardrails.md) for safety checks (secret redaction, fix vetting, prompt-injection fencing).
+- **Fixes** show as a colored diff against your file (`+added -removed`), or "no code changes suggested". You never get a full copy of an unchanged file.
+- **Structured logs** go to `sessions/trx_events.jsonl` instead of the terminal. Set `RD_STRUCTURED_LOGS=stdout` to print them, or `false` to turn them off.
+
 ---
 
 ## Clean Output Example

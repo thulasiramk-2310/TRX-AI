@@ -15,6 +15,7 @@ dependencies = [
     "reportlab>=4.0.0",
     "numpy>=1.26",
     "watchdog>=4.0",
+    "prompt_toolkit>=3.0.43",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +33,7 @@ trx = "main:main"
 # working directory, so use an editable install (`pip install -e .`) from the repo root.
 py-modules = [
     "analyzer",
+    "cli_input",
     "cloud_memory_sync",
     "config",
     "conversation_memory",

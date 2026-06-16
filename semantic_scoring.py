@@ -27,8 +27,13 @@ DEFAULT_SYNONYMS: dict[str, set[str]] = {
 }
 
 
+# Connective words carry no signal in short labels like "use a set" or "check for empty input".
+LABEL_STOPWORDS = {"a", "an", "the", "or", "and", "for", "to", "of", "on", "in", "with", "is", "be"}
+
+
 def _normalize_text(text: str) -> str:
-    lowered = text.lower()
+    # Split CamelCase identifiers (IndexError -> Index Error) before lowercasing.
+    lowered = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text).lower()
     cleaned = re.sub(r"[^a-z0-9\s_\-]+", " ", lowered)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
@@ -74,7 +79,6 @@ class SemanticMatcher:
         if not expected_tokens or not actual_tokens:
             return 0.0
 
-        expected_expanded = self._expand_tokens(expected_tokens)
         expected_bigrams = self._bigrams(expected_tokens)
         actual_text = " ".join(actual_tokens)
 
@@ -93,7 +97,12 @@ class SemanticMatcher:
                 if best_fuzzy >= 0.96:
                     break
 
-        overlap = len(expected_expanded.intersection(set(actual_tokens))) / max(1, len(expected_expanded))
+        # Each expected content token counts once, satisfied by itself or any synonym.
+        # (Synonyms must not inflate the denominator, or richer labels score lower.)
+        actual_set = set(actual_tokens)
+        content_tokens = [t for t in dict.fromkeys(expected_tokens) if t not in LABEL_STOPWORDS] or expected_tokens
+        matched = sum(1 for t in content_tokens if t in actual_set or self._expand_tokens([t]) & actual_set)
+        overlap = matched / len(content_tokens)
         actual_bigrams = self._bigrams(actual_tokens)
         bigram_overlap = len(expected_bigrams.intersection(actual_bigrams)) / max(1, len(expected_bigrams))
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from guardrails import redact
 import json
 import math
 import re
@@ -16,10 +17,7 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     faiss = None
 
-try:
-    from sentence_transformers import SentenceTransformer  # type: ignore
-except Exception:  # pragma: no cover - optional dependency
-    SentenceTransformer = None
+import embeddings
 
 
 class VectorMemory:
@@ -34,11 +32,18 @@ class VectorMemory:
         self.path = Path(path)
         self.embedding_model = embedding_model
         self.entries: list[dict[str, Any]] = []
-        self._model = None
-        self._index = None
         self._dim = 384
         self._load()
-        self._bootstrap_index()
+        # No model loading here: the shared embedding model warms up in the background
+        # (embeddings.warm_up) and search() uses it once ready, lexical ranking until then.
+        if self.enabled and faiss is not None:
+            embeddings.warm_up(self.embedding_model)
+
+    @property
+    def _model(self) -> Any:
+        if not self.enabled or faiss is None:
+            return None
+        return embeddings.ready(self.embedding_model)
 
     def _load(self) -> None:
         try:
@@ -53,21 +58,8 @@ class VectorMemory:
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"version": 1, "entries": self.entries[-2000:]}
-        self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.path.write_text(json.dumps(redact(payload), ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def _bootstrap_index(self) -> None:
-        if not self.enabled or SentenceTransformer is None or faiss is None:
-            return
-        try:
-            self._model = SentenceTransformer(self.embedding_model)
-            self._index = faiss.IndexFlatL2(self._dim)
-            texts = [str(item.get("text", "")) for item in self.entries]
-            if texts:
-                emb = self._model.encode(texts)
-                self._index.add(np.array(emb).astype("float32"))
-        except Exception:
-            self._model = None
-            self._index = None
 
     @staticmethod
     def _normalize_tokens(text: str) -> list[str]:
@@ -108,13 +100,6 @@ class VectorMemory:
         self.entries = self.entries[-2000:]
         self._save()
 
-        if self._index is not None and self._model is not None:
-            try:
-                emb = self._model.encode([value])
-                self._index.add(np.array(emb).astype("float32"))
-            except Exception:
-                pass
-
     def search(
         self,
         query: str,
@@ -138,14 +123,15 @@ class VectorMemory:
             return []
 
         # If semantic dependencies are available, use embeddings.
-        if self._index is not None and self._model is not None:
+        model = self._model
+        if model is not None:
             try:
                 # Build pool-local mapping by re-encoding pool for accuracy under filtering.
                 pool_texts = [str(item.get("text", "")) for item in pool]
-                pool_emb = self._model.encode(pool_texts)
+                pool_emb = model.encode(pool_texts)
                 pool_index = faiss.IndexFlatL2(self._dim)
                 pool_index.add(np.array(pool_emb).astype("float32"))
-                q_emb = self._model.encode([str(query or "")])
+                q_emb = model.encode([str(query or "")])
                 _, idx = pool_index.search(np.array(q_emb).astype("float32"), max(1, int(k)))
                 out: list[str] = []
                 for i in idx[0]:

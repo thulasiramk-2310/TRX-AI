@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import embeddings
+
 
 @dataclass(frozen=True)
 class SemanticIntentResult:
@@ -32,33 +34,41 @@ GENERAL_EXAMPLES = [
 
 
 class SemanticRouter:
+    """Embedding-based intent signal. Never blocks start-up: the shared model loads in the
+    background, and until it is ready `semantic_intent` returns None (rule routing still works)."""
+
     def __init__(self) -> None:
         self._model: Any = None
         self._util: Any = None
         self._code_embeddings: Any = None
         self._general_embeddings: Any = None
         self._available = False
-        self._init_backend()
+        embeddings.warm_up()
 
-    def _init_backend(self) -> None:
+    def _init_backend(self) -> bool:
+        if self._available:
+            return True
+        model = embeddings.ready()
+        if model is None:
+            return False
         try:
-            from sentence_transformers import SentenceTransformer, util  # type: ignore
+            from sentence_transformers import util  # type: ignore
 
-            model = SentenceTransformer("all-MiniLM-L6-v2")
-            self._model = model
             self._util = util
             self._code_embeddings = model.encode(CODE_EXAMPLES, convert_to_tensor=True)
             self._general_embeddings = model.encode(GENERAL_EXAMPLES, convert_to_tensor=True)
+            self._model = model
             self._available = True
         except Exception:
             self._available = False
+        return self._available
 
     @property
     def available(self) -> bool:
-        return self._available
+        return self._init_backend()
 
     def semantic_intent(self, text: str) -> SemanticIntentResult | None:
-        if not self._available:
+        if not self._init_backend():
             return None
         try:
             emb = self._model.encode(text, convert_to_tensor=True)

@@ -167,6 +167,26 @@ class EvaluateTests(unittest.TestCase):
             evaluate_trx_ai(self.analyzer, CASES, threshold=0, save_report=False, verbose=False)
 
 
+class StratifiedSampleTests(unittest.TestCase):
+    def test_sample_covers_categories_and_is_deterministic(self) -> None:
+        cases = load_dataset()
+        first = evaluation.stratified_sample(cases, 20, seed=0)
+        second = evaluation.stratified_sample(cases, 20, seed=0)
+        self.assertEqual(len(first), 20)
+        self.assertEqual([c.id for c in first], [c.id for c in second])
+        self.assertEqual({c.category for c in first}, {c.category for c in cases})
+        self.assertNotEqual(
+            [c.id for c in first], [c.id for c in evaluation.stratified_sample(cases, 20, seed=1)]
+        )
+
+    def test_sample_edge_sizes(self) -> None:
+        cases = load_dataset()
+        self.assertEqual(len(evaluation.stratified_sample(cases, 0)), len(cases))
+        self.assertEqual(len(evaluation.stratified_sample(cases, 500)), len(cases))
+        with self.assertRaises(ValueError):
+            evaluation.stratified_sample(cases, 2)
+
+
 class EvalCliTests(unittest.TestCase):
     def test_filters_with_no_matches_return_error(self) -> None:
         with patch("builtins.print"):

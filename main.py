@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from guardrails import redact
 import argparse
 import difflib
 import json
@@ -12,16 +13,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from rich.align import Align
-from rich.console import Console
-from rich.live import Live
-from rich.prompt import Prompt
-from rich.spinner import Spinner
+from rich.console import Console, Group
+from rich.control import Control
+from rich.segment import ControlType
+from rich.markup import escape
 from rich.text import Text
 
 from analyzer import RealityAnalyzer
+from cli_input import StatusState, build_prompt_fn, normalize_command
 from config import AppConfig
-from formatter import OutputFormatter
+from formatter import THEME, OutputFormatter, gradient_text
+from guardrails import Finding, check_fix, find_prompt_injection
 from history import SessionHistory
 from mcp_graph import detect_mcp_graph_status
 from observability import METRICS
@@ -52,11 +54,18 @@ SUPPORTED_CODE_SUFFIXES = {
 
 
 def _build_cli_prompt(console: Console, personality: str) -> str:
-    mode_label = personality.upper()
-
     if not console.color_system:
-        return f"trx[{personality}] >"
-    return f"[bold #0f172a on #86efac] trx[{mode_label.lower()}] [/][bold #22c55e] >[/]"
+        return ">"
+    return f"[{THEME['accent']}]{_glyph(console, '❯', '>')}[/]"
+
+
+def _glyph(console: Console, fancy: str, plain: str) -> str:
+    encoding = str(getattr(getattr(console, "file", None), "encoding", "") or "utf-8")
+    try:
+        fancy.encode(encoding)
+        return fancy
+    except (LookupError, UnicodeEncodeError):
+        return plain
 
 
 def _loader_text_for_prompt(user_input: str) -> str:
@@ -94,22 +103,38 @@ def _loader_text_for_prompt(user_input: str) -> str:
 
 
 def _show_prompt_loader(console: Console, user_input: str, delay_seconds: float) -> None:
-    loader_text = _loader_text_for_prompt(user_input)
-    spinner = Spinner("dots", text=loader_text, style="bright_cyan")
-    with Live(Align.center(spinner), console=console, refresh_per_second=20, transient=True):
-        time.sleep(max(0.16, min(0.65, delay_seconds)))
+    """Kept for callers; instant commands no longer get an artificial delay."""
+    return
 
 
 def _run_with_prompt_loader(console: Console, user_input: str, operation: Callable[[], Any]) -> Any:
-    loader_text = _loader_text_for_prompt(user_input)
-    spinner = Spinner("dots", text=loader_text, style="bright_cyan")
-    with Live(Align.center(spinner), console=console, refresh_per_second=20, transient=True):
+    """Shows one static "working" line while `operation` runs, then erases it.
+
+    Deliberately not animated: a spinner redraws many times per second, and every redraw makes
+    the terminal jump back to the bottom when you have scrolled up to read earlier output.
+    """
+    show = console.is_terminal
+    if show:
+        console.print(
+            Text.assemble(("  ", ""), (_glyph(console, "⋯", "..."), THEME["accent"]),
+                          (f" {_loader_text_for_prompt(user_input)}", THEME["muted"]),
+                          ("  Ctrl+C to cancel", THEME["border"])),
+            end="",
+        )
+        console.file.flush()
+    try:
         return operation()
+    finally:
+        if show:
+            console.control(Control.move_to_column(0), Control((ControlType.ERASE_IN_LINE, 2)))
+            console.file.flush()
 
 
 def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
     console = Console()
     config = AppConfig.from_env()
+    # Show the welcome before any slow set-up, so the terminal is never blank at start.
+    _print_startup(console)
     analyzer = RealityAnalyzer(config)
     formatter = OutputFormatter(
         console,
@@ -138,18 +163,35 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
     total_analyses = 0
     active_watchers: list[Any] = []
 
-    prompt = input_fn or (lambda message: Prompt.ask(message))
+    status = StatusState(
+        model=str(getattr(config, "local_llm_model", "unknown")),
+        mode=mode,
+        personality=personality,
+        llm_enabled=bool(getattr(config, "use_local_llm", True)),
+    )
+    if input_fn is not None:
+        # Tests and scripted runs inject input directly; still accept /slash aliases.
+        def prompt(message: str) -> str:
+            return normalize_command(input_fn(message))
+    else:
+        prompt = build_prompt_fn(status)
+    command_started: float | None = None
+    runs_before_command = total_analyses
 
-    _print_startup(console)
     _print_dashboard(console, config, total_analyses, analyzer)
     _print_startup_warnings(console, config)
 
     while True:
+        # Refresh the bottom toolbar with the outcome of the previous command.
+        if command_started is not None and total_analyses > runs_before_command:
+            status.last_latency = time.perf_counter() - command_started
+        status.mode, status.personality, status.runs = mode, personality, total_analyses
         try:
             user_input = prompt(_build_cli_prompt(console, personality)).strip()
+            command_started, runs_before_command = time.perf_counter(), total_analyses
         except (KeyboardInterrupt, EOFError):
             _shutdown_watchers(active_watchers)
-            console.print("\nExiting TRX. Goodbye!", style="cyan")
+            console.print("\nGoodbye.", style=THEME["muted"])
             break
 
         if not user_input:
@@ -162,13 +204,13 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
         if command in {"exit", "quit"}:
             _run_with_prompt_loader(console, user_input, lambda: None)
             _shutdown_watchers(active_watchers)
-            console.print("Exiting TRX. Goodbye!", style="cyan")
+            console.print("Goodbye.", style=THEME["muted"])
             break
 
         if command in {"chat", "code", "auto"}:
             mode = command
             config.assistant_mode = "general" if mode == "chat" else mode
-            console.print(f"Mode switched: {mode.upper()}", style="cyan")
+            console.print(f"  mode {_glyph(console, '→', '->')} {mode}", style=THEME["muted"])
             continue
 
         if command == "personality":
@@ -381,6 +423,8 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                 model_name=config.local_llm_model,
                 active_agents=analyzer.active_agents(),
             )
+            if command_started is not None:
+                result.setdefault("elapsed_seconds", time.perf_counter() - command_started)
             formatter.render(result, analysis_profile, total_runs=total_analyses)
             history.add_entry(user_input, analysis_profile, result)
             _append_run_history(user_input, analysis_profile, result)
@@ -527,6 +571,7 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                 )
                 result["original_code"] = code_blob[:20000]
                 result["review_target"] = target
+                result["guardrails"] = _injection_findings(code_blob)
                 total_analyses += 1
                 _attach_ui_context(
                     result,
@@ -534,12 +579,14 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                     model_name=config.local_llm_model,
                     active_agents=analyzer.active_agents(),
                 )
+                if command_started is not None:
+                    result.setdefault("elapsed_seconds", time.perf_counter() - command_started)
                 formatter.render(result, analysis_profile, total_runs=total_analyses)
                 history.add_entry(f"review {target}", "review", result)
                 _append_run_history(f"review {target}", "review", result)
                 _print_dashboard(console, config, total_analyses, analyzer)
             except KeyboardInterrupt:
-                console.print("\n[Cancelled] Review interrupted by user.", style="yellow")
+                console.print("  review cancelled", style=THEME["muted"])
             except FileNotFoundError:
                 _print_error(console, f"File or folder not found: {target}")
             except IsADirectoryError:
@@ -577,6 +624,10 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                 )
                 result["original_code"] = original_code[:20000]
                 result["review_target"] = target
+                fixed_code = str(result.get("fixed_code", "")).strip()
+                # Guardrails run before the user is asked anything, and show inside the review.
+                fix_findings = check_fix(original_code, fixed_code, _language_for_path(target_path)) if fixed_code else []
+                result["guardrails"] = _injection_findings(original_code) + fix_findings
                 total_analyses += 1
                 _attach_ui_context(
                     result,
@@ -584,20 +635,25 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                     model_name=config.local_llm_model,
                     active_agents=analyzer.active_agents(),
                 )
+                if command_started is not None:
+                    result.setdefault("elapsed_seconds", time.perf_counter() - command_started)
                 formatter.render(result, analysis_profile, total_runs=total_analyses)
                 history.add_entry(f"fix {target}", "fix", result)
                 _append_run_history(f"fix {target}", "fix", result)
 
-                fixed_code = str(result.get("fixed_code", "")).strip()
                 if not fixed_code:
                     _print_error(console, "No fixed code was generated by the model.")
                     _print_dashboard(console, config, total_analyses, analyzer)
                     continue
 
-                _print_fix_diff_preview(console, str(target_path), original_code, fixed_code)
-                confirm = prompt("Apply fix? (y/n)").strip().lower()
-                if confirm not in {"y", "yes"}:
-                    console.print("Fix canceled.", style="yellow")
+                if any(f.blocking for f in fix_findings):
+                    # Blocked fixes need a deliberate override, not a reflexive "y".
+                    answer = prompt("Blocked by guardrails. Type 'force' to save anyway, Enter to cancel")
+                    approved = answer.strip().lower() == "force"
+                else:
+                    approved = prompt("Apply fix? (y/n)").strip().lower() in {"y", "yes"}
+                if not approved:
+                    console.print("  fix not saved", style=THEME["muted"])
                     _print_dashboard(console, config, total_analyses, analyzer)
                     continue
 
@@ -617,7 +673,7 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                 console.print(f"[OK] Fixed file saved as: {fixed_path}", style="green")
                 _print_dashboard(console, config, total_analyses, analyzer)
             except KeyboardInterrupt:
-                console.print("\n[Cancelled] Fix interrupted by user.", style="yellow")
+                console.print("  fix cancelled", style=THEME["muted"])
             except FileNotFoundError:
                 _print_error(console, f"File not found: {target}")
             except ValueError as exc:
@@ -682,12 +738,14 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                 model_name=config.local_llm_model,
                 active_agents=analyzer.active_agents(),
             )
+            if command_started is not None:
+                result.setdefault("elapsed_seconds", time.perf_counter() - command_started)
             formatter.render(result, analysis_profile, total_runs=total_analyses)
             history.add_entry(user_input, analysis_profile, result)
             _append_run_history(user_input, analysis_profile, result)
             _print_dashboard(console, config, total_analyses, analyzer)
         except KeyboardInterrupt:
-            console.print("\n[Cancelled] Request interrupted by user.", style="yellow")
+            console.print("  cancelled", style=THEME["muted"])
         except ValueError as exc:
             _print_error(console, str(exc))
         except Exception as exc:
@@ -863,6 +921,23 @@ def _build_fix_comment_header(
     return "\n".join(header_lines)
 
 
+_LANGUAGE_BY_SUFFIX = {".py": "python", ".js": "javascript", ".ts": "typescript", ".java": "java",
+                       ".go": "go", ".c": "c", ".cpp": "cpp", ".cc": "cpp", ".rs": "rust", ".sql": "sql"}
+
+
+def _language_for_path(path: Path) -> str:
+    return _LANGUAGE_BY_SUFFIX.get(path.suffix.lower(), path.suffix.lower().lstrip("."))
+
+
+def _injection_findings(code: str) -> list[Finding]:
+    """Warns when reviewed code contains text that tries to steer the AI reviewer."""
+    phrases = find_prompt_injection(code)
+    if not phrases:
+        return []
+    quoted = ", ".join(f"`{p}`" for p in phrases[:3])
+    return [Finding("warn", f"Code contains text aimed at AI reviewers ({quoted}); treat this review with care.")]
+
+
 def apply_code_fix(
     original_path: str,
     fixed_code: str,
@@ -903,7 +978,7 @@ def _append_run_history(user_input: str, mode: str, result: dict[str, Any]) -> N
     }
     RUN_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
     with RUN_HISTORY_PATH.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        handle.write(json.dumps(redact(record), ensure_ascii=False) + "\n")
 
 
 def _attach_ui_context(
@@ -1122,26 +1197,49 @@ def _print_dashboard(
     return
 
 
+def render_welcome(console: Console, *, model: str, mode: str, cwd: str, llm_on: bool) -> None:
+    """Gradient wordmark + a static HUD boot panel. Printed once: nothing animates or redraws."""
+    hud = OutputFormatter(console)
+    g = hud._glyphs()
+    fancy = g["dot"] != "*"
+    dot = f" {g['sep']} "
+    llm = ("local LLM", THEME["fix"]) if llm_on else ("rule-based (LLM off)", THEME["perf"])
+
+    blocks: list[Any] = [Text("")]
+    if fancy and _glyph(console, LOGO_LINES[0], "") and console.width >= 40:
+        blocks += [Text("  ").append_text(gradient_text(line)) for line in LOGO_LINES]
+        blocks.append(Text(""))
+    blocks.append(hud._hud_rule("TRX", "Think. Reason. Execute.", Text("v0.2", style=THEME["muted"])))
+
+    def row(key: str, *values: tuple[str, str]) -> Text:
+        line = Text.assemble((f"  {g['dot']} ", THEME["accent2"]), (f"{key:<7}", THEME["muted"]))
+        for i, (value, style) in enumerate(values):
+            if i:
+                line.append(dot, style=THEME["border"])
+            line.append(value, style=style)
+        return line
+
+    blocks += [
+        row("core", (model, f"bold {THEME['text']}"), llm),
+        row("mode", (mode, THEME["text"])),
+        row("cwd", (cwd, THEME["text"])),
+        Text(""),
+        Text.assemble((f"  {g['arrow']} ", THEME["accent3"]), ("/help", THEME["code"]),
+                      (" commands" + dot, THEME["muted"]), ("review <file>", THEME["code"]),
+                      (" to start" + dot, THEME["muted"]), ("Tab", THEME["code"]), (" completes", THEME["muted"])),
+    ]
+    hud._print(Group(*blocks))
+
+
 def _print_startup(console: Console) -> None:
-    try:
-        encoding = (getattr(getattr(console, "file", None), "encoding", None) or "").lower()
-    except Exception:
-        encoding = ""
-    use_ascii = encoding in {"cp1252", "ascii"}
-    logo_lines = ASCII_LOGO_LINES if use_ascii else LOGO_LINES
-
-    for line in logo_lines:
-        console.print(Align.center(f"[bold cyan]{line}[/bold cyan]"))
-    console.print(Align.center("[bold]TRX — Think. Reason. Execute.[/bold]"))
-    console.print(Align.center("[dim]Mode: AUTO (General + Code)[/dim]"))
-    graph = detect_mcp_graph_status()
-    console.print(Align.center(f"[dim]Graph: {'ACTIVE' if graph.exists and graph.state == 'ready' else 'DEGRADED'}[/dim]"))
-
-    spinner = Spinner("dots", text="Initializing system...", style="cyan")
-    with Live(Align.center(spinner), console=console, refresh_per_second=20, transient=True):
-        time.sleep(0.8)
-
-    console.clear()
+    config = AppConfig.from_env()
+    render_welcome(
+        console,
+        model=str(getattr(config, "local_llm_model", "unknown")),
+        mode=str(config.assistant_mode or "auto").lower(),
+        cwd=str(Path.cwd()),
+        llm_on=bool(config.use_local_llm),
+    )
 
 
 def _print_help(console: Console) -> None:
@@ -1187,14 +1285,16 @@ def _print_startup_warnings(console: Console, config: AppConfig) -> None:
     elif graph_status.state != "ready":
         warning_lines.append(f"- MCP graph database state is '{graph_status.state}' and may be unusable.")
 
+    warn = _glyph(console, "⚠", "!")
     for line in warning_lines:
         wrapped = textwrap.fill(
-            line,
-            width=max(40, console.size.width - 4),
+            line.lstrip("- "),
+            width=max(40, console.size.width - 6),
             break_long_words=False,
             break_on_hyphens=False,
+            subsequent_indent="    ",
         )
-        console.print(wrapped, style="yellow")
+        console.print(f"  [{THEME['perf']}]{warn}[/] [{THEME['muted']}]{escape(wrapped)}[/]")
 
 
 def build_parser() -> argparse.ArgumentParser:
