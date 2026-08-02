@@ -1,0 +1,164 @@
+/* TRX full-screen layout: masthead / (nav | stream | telemetry) / command bar / footer */
+
+Screen {
+    background: $background;
+    layout: vertical;
+}
+
+#masthead {
+    height: 5;
+    padding: 0 2;
+    background: $surface;
+    border-bottom: heavy $primary 40%;
+}
+
+#body {
+    height: 1fr;
+}
+
+/* ---- left: navigation ---------------------------------------------------------- */
+#nav {
+    width: 26;
+    padding: 1 1;
+    background: $surface;
+    border-right: vkey $primary 25%;
+}
+#nav OptionList {
+    background: transparent;
+    border: none;
+    height: auto;
+    padding: 0;
+}
+#nav OptionList > .option-list--option-highlighted {
+    background: $primary 20%;
+    color: $primary;
+    text-style: bold;
+}
+.nav-label {
+    color: $text-muted;
+    text-style: bold;
+    margin: 1 0 0 1;
+}
+#session {
+    margin: 1 0 0 0;
+    padding: 0 1;
+    height: auto;
+}
+
+/* ---- centre: conversation / review stream ---------------------------------------- */
+#stream {
+    width: 1fr;
+    padding: 1 2;
+    scrollbar-color: $primary 40%;
+    scrollbar-size-vertical: 1;
+}
+.user-msg {
+    width: auto;
+    max-width: 90%;
+    margin: 0 0 1 0;
+    padding: 0 1;
+    background: $panel;
+    border-left: outer $secondary;
+    color: $foreground;
+}
+.review-card {
+    height: auto;
+    margin: 0 0 1 0;
+    padding: 1 2;
+    background: $surface;
+    border: panel $primary;
+    border-title-color: $background;
+    border-title-style: bold;
+    border-subtitle-color: $text-muted;
+}
+.patch {
+    height: auto;
+    margin: 1 0 0 0;
+    padding: 0 1;
+    background: $background;
+    border: round $success 50%;
+    border-title-color: $success;
+}
+.answer {
+    height: auto;
+    margin: 0 0 1 0;
+    padding: 1 2;
+    background: $surface;
+    border: tall $secondary 60%;
+}
+
+/* ---- right: telemetry ------------------------------------------------------------ */
+#telemetry {
+    width: 46;
+    padding: 0 1;
+    background: $surface;
+    border-left: vkey $primary 25%;
+}
+.tile {
+    height: auto;
+    margin: 1 0 0 0;
+    padding: 0 1;
+    border: round $primary 35%;
+    border-title-color: $primary;
+    border-title-style: bold;
+}
+#confidence Digits {
+    color: $primary;
+    width: auto;
+}
+#latency-spark {
+    height: 3;
+    margin: 0 0 0 0;
+}
+#latency-spark > .sparkline--max-color { color: $accent; }
+#latency-spark > .sparkline--min-color { color: $primary; }
+#pipeline-bar {
+    margin: 1 0 0 0;
+    width: 100%;
+}
+#pipeline-bar Bar > .bar--bar { color: $primary; }
+
+/* ---- bottom: command bar --------------------------------------------------------- */
+#command {
+    height: 3;
+    margin: 0 2;
+    background: $surface;
+    border: tall $primary;
+}
+#command:focus {
+    border: tall $accent;
+}
+Footer {
+    background: $surface;
+}
+
+/* ---- notes, help, confirm dialog ----------------------------------------------------------- */
+.note {
+    height: auto;
+    margin: 0 0 1 2;
+}
+Markdown.answer {
+    padding: 0 2;
+}
+ConfirmFix {
+    align: center middle;
+    background: $background 70%;
+}
+#confirm {
+    width: 72;
+    height: auto;
+    padding: 1 2;
+    background: $surface;
+    border: panel $warning;
+    border-title-color: $background;
+}
+#confirm-title { margin: 0 0 1 0; }
+.confirm-finding { color: $error; }
+.confirm-hint { margin: 1 0 0 0; color: $text-muted; }
+#force-input { margin: 1 0 0 0; }
+#confirm-buttons {
+    height: auto;
+    margin: 1 0 0 0;
+    align: right middle;
+}
+#confirm-buttons Button { margin: 0 0 0 2; }

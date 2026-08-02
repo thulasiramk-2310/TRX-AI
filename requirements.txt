@@ -4,3 +4,4 @@ reportlab>=4.0.0
 numpy>=1.26
 watchdog>=4.0
 prompt_toolkit>=3.0.43
+textual>=1.0

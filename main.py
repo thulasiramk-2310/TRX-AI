@@ -6,6 +6,7 @@ from guardrails import redact
 import argparse
 import difflib
 import json
+import os
 import sys
 import textwrap
 import time
@@ -1299,6 +1300,8 @@ def _print_startup_warnings(console: Console, config: AppConfig) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="trx", description="TRX CLI")
+    parser.add_argument("--classic", action="store_true",
+                        help="use the classic scrolling CLI instead of the full-screen app")
     subparsers = parser.add_subparsers(dest="command")
 
     p_benchmark = subparsers.add_parser("benchmark", help="Run benchmark mode")
@@ -1332,7 +1335,6 @@ def main(argv: list[str] | None = None) -> int:
         from evaluation import main as eval_main
 
         return eval_main(argv[1:])
-
     args = build_parser().parse_args(argv)
     if args.command == "benchmark":
         run_benchmark_mode(runs=args.runs, debug=args.debug)
@@ -1345,9 +1347,24 @@ def main(argv: list[str] | None = None) -> int:
             run_analyze_mode(text=args.text, mode=args.mode, debug=args.debug, debug_cache=args.debug_cache)
     elif args.command == "test":
         run_test_mode(debug=args.debug)
+    elif not args.classic and _fullscreen_available():
+        from tui.app import TRXApp
+
+        TRXApp().run()
     else:
         run_cli()
     return 0
+
+
+def _fullscreen_available() -> bool:
+    """Full-screen app only on a real interactive terminal with Textual installed."""
+    if os.getenv("TRX_UI", "").lower() == "classic" or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return False
+    try:
+        import textual  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
 if __name__ == "__main__":

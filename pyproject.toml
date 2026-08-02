@@ -16,6 +16,7 @@ dependencies = [
     "numpy>=1.26",
     "watchdog>=4.0",
     "prompt_toolkit>=3.0.43",
+    "textual>=1.0",
 ]
 
 [project.optional-dependencies]
@@ -28,6 +29,9 @@ dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.6"]
 [project.scripts]
 trx = "main:main"
 
+[tool.setuptools.package-data]
+tui = ["*.tcss"]
+
 [tool.setuptools]
 # Flat module layout. The app reads sessions/, .env and benchmarks/ relative to the
 # working directory, so use an editable install (`pip install -e .`) from the repo root.
@@ -37,9 +41,11 @@ py-modules = [
     "cloud_memory_sync",
     "config",
     "conversation_memory",
+    "embeddings",
     "evaluation",
     "formatter",
     "graph_query_adapter",
+    "guardrails",
     "history",
     "intent_rules",
     "llm_client",
@@ -58,6 +64,7 @@ py-modules = [
     "vector_memory",
     "watcher",
 ]
+packages = ["tui"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
