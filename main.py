@@ -725,7 +725,7 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
             continue
 
         try:
-            context = history.recent_context(limit=config.context_window_size)
+            context = history.recent_context(limit=config.context_window_size, owner=current_user or "guest")
             result = _run_with_prompt_loader(
                 console,
                 user_input,

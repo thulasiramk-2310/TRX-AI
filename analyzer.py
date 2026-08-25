@@ -1,4 +1,4 @@
-﻿"""Core analysis engine for TRX-AI with local Ollama inference and rule fallback."""
+"""Core analysis engine for TRX-AI with local Ollama inference and rule fallback."""
 
 from __future__ import annotations
 
@@ -319,6 +319,7 @@ class RealityAnalyzer:
             result["mcp_query_status"] = "UNKNOWN"
         result["cache_hit"] = any(item == "cache_hit" for item in statuses)
         result["personality"] = self.personality
+        result["current_user"] = self.current_user
         breaker_state = str(METRICS.snapshot().get("states", {}).get("circuit_breaker_state", "CLOSED"))
         result["circuit_breaker_state"] = breaker_state
         METRICS.set_state("circuit_breaker_state", breaker_state)
@@ -340,7 +341,7 @@ class RealityAnalyzer:
             response = str(result.get("chat_response", "")).strip()
             if user_input and response:
                 try:
-                    self._conversation_memory.add(self.personality, user_input, response)
+                    self._conversation_memory.add(self.personality, user_input, response, owner=self.current_user)
                 except Exception:
                     pass
                 try:
@@ -565,11 +566,11 @@ class RealityAnalyzer:
     def _handle_general_qa(self, query: str) -> dict[str, Any]:
         q = query.lower().strip()
         meta = personality_meta(self.personality)
-        context = self._conversation_memory.get_context(self.personality).strip()
+        context = self._conversation_memory.get_context(self.personality, owner=self.current_user).strip()
         related = self._vector_memory.search(
             query,
             k=3,
-            user=self.current_user if self.current_user != "guest" else None,
+            user=self.current_user,
             personality=self.personality,
         )
         related_context = "\n".join(f"- {item}" for item in related[:3]).strip()
@@ -751,6 +752,7 @@ Answer:
 
         return {
             "response_mode": "analysis",
+            "current_user": self.current_user,
             "debug_analysis": debug_result,
             "improvements": improve_result,
             "predictions": predict_result,
@@ -857,6 +859,7 @@ Answer:
         cached_review = self._review_cache_get(review_cache_key)
         if cached_review is not None:
             cached_copy = copy.deepcopy(cached_review)
+            cached_copy["current_user"] = self.current_user
             statuses = cached_copy.get("system_status", [])
             if isinstance(statuses, list) and "cache_hit" not in statuses:
                 statuses.append("cache_hit")
@@ -926,6 +929,7 @@ Answer:
         confidence_score = int(fallback_sections.get("confidence_score", 65))
         return {
             "response_mode": "analysis",
+            "current_user": self.current_user,
             "analysis_text": self._compose_code_review_text(fallback_sections),
             "system_status": [
                 "intent=review",
@@ -1012,6 +1016,7 @@ Answer:
 
         return {
             "response_mode": "analysis",
+            "current_user": self.current_user,
             "analysis_text": analysis_text,
             "system_status": status,
             "confidence": round(confidence_score / 100.0, 2),
@@ -2217,7 +2222,15 @@ IMPORTANT:
 
     def _cache_key(self, user_input: str, mode: str, context: list[dict[str, Any]]) -> str:
         context_slice = context[-self.config.context_window_size:]
-        raw = f"{mode}|{user_input.lower().strip()}|{context_slice}"
+        raw = json.dumps({
+            "user": self.current_user, "personality": self.personality,
+            "mode": mode, "input": user_input.strip(), "context": context_slice,
+            "model": self.config.local_llm_model, "url": self.config.local_llm_url,
+            "llm_enabled": self.config.use_local_llm,
+            "temperature": self.config.local_llm_temperature,
+            "max_tokens": self.config.local_llm_max_new_tokens,
+            "agents": self.active_agents(),
+        }, sort_keys=True, default=str)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def _cache_get(self, key: str) -> dict[str, Any] | None:
@@ -2260,7 +2273,12 @@ IMPORTANT:
             self._response_cache.popitem(last=False)
 
     def _review_cache_key(self, code: str, language: str) -> str:
-        raw = f"{language}|{self.config.local_llm_model}|{code.strip()}"
+        raw = json.dumps({
+            "version": 2, "language": language, "code": code.strip(),
+            "user": self.current_user, "model": self.config.local_llm_model,
+            "url": self.config.local_llm_url, "llm_enabled": self.config.use_local_llm,
+            "temperature": self.config.local_llm_temperature,
+        }, sort_keys=True)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def _review_cache_get(self, key: str) -> dict[str, Any] | None:

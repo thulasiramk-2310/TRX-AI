@@ -31,11 +31,15 @@ class SessionHistory:
     def list_inputs(self) -> list[str]:
         return [entry["input"] for entry in self.entries]
 
-    def recent_context(self, limit: int = 3) -> list[dict[str, Any]]:
+    def recent_context(self, limit: int = 3, *, owner: str | None = None) -> list[dict[str, Any]]:
         """Returns the most recent session items for contextual reasoning."""
         if limit <= 0:
             return []
-        return self.entries[-limit:]
+        entries = self.entries
+        if owner is not None:
+            entries = [entry for entry in entries
+                       if entry.get("analysis", {}).get("current_user", "guest") == owner]
+        return entries[-limit:]
 
     def latest_entry(self) -> dict[str, Any] | None:
         """Returns the latest session entry if available."""
