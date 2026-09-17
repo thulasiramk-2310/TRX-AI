@@ -1,4 +1,4 @@
-"""Core analysis engine for TRX-AI with local Ollama inference and rule fallback."""
+﻿"""Core analysis engine for TRX-AI with local Ollama inference and rule fallback."""
 
 from __future__ import annotations
 
@@ -752,7 +752,6 @@ Answer:
 
         return {
             "response_mode": "analysis",
-            "current_user": self.current_user,
             "debug_analysis": debug_result,
             "improvements": improve_result,
             "predictions": predict_result,
@@ -925,7 +924,14 @@ Answer:
 
     def _build_review_failure_result(self, cleaned_code: str, language: str) -> dict[str, Any]:
         fallback_sections = self._fallback_code_review_sections(cleaned_code)
-        heuristic_fixed = self._rule_based_fixed_code(cleaned_code, language)
+        oversized = len(cleaned_code) > self.REVIEW_PROMPT_MAX_CHARS
+        if oversized:
+            fallback_sections["final_summary"] = [
+                "Whole-file fix generation is disabled for this large input; review a smaller file or function.",
+                *fallback_sections.get("final_summary", []),
+            ]
+        heuristic_fixed = (self._rule_based_fixed_code(cleaned_code, language)
+                           if len(cleaned_code) <= self.REVIEW_PROMPT_MAX_CHARS else "")
         confidence_score = int(fallback_sections.get("confidence_score", 65))
         return {
             "response_mode": "analysis",
@@ -935,7 +941,8 @@ Answer:
                 "intent=review",
                 "source=rule-fallback",
                 "llm_unavailable",
-                "fixed_code_heuristic",
+                "fixed_code_heuristic" if heuristic_fixed else "fixed_code_missing",
+                *(["fix_blocked_incomplete_input"] if oversized else []),
                 *self._mcp_status_tags(),
             ],
             "confidence": round(confidence_score / 100.0, 2),
@@ -957,6 +964,9 @@ Answer:
         cleaned_code: str,
         language: str,
     ) -> tuple[str, bool]:
+        # Whole-file replacements cannot safely be built from a prefix of the file.
+        if len(cleaned_code) > self.REVIEW_PROMPT_MAX_CHARS:
+            return "", False
         fixed_code = self._extract_fixed_code(response_text)
         repaired_from_invalid = False
         needs_optimization_gate = language == "python" and self._requires_python_optimization(cleaned_code)
@@ -1000,6 +1010,13 @@ Answer:
         status = ["intent=review", "source=llm", "llm_ok", *self._mcp_status_tags()]
         if len(cleaned_code) > self.REVIEW_PROMPT_MAX_CHARS:
             status.append("code_truncated_for_review")
+            status.append("fix_blocked_incomplete_input")
+            sections["final_summary"] = [
+                f"Partial review: only the first {self.REVIEW_PROMPT_MAX_CHARS} characters were reviewed. "
+                "Whole-file fix generation is disabled; review a smaller file or function.",
+                *sections.get("final_summary", []),
+            ]
+            analysis_text = self._compose_code_review_text(sections)
         if truncated:
             status.append("llm_output_truncated")
         status.append("fixed_code_ready" if fixed_code else "fixed_code_missing")
@@ -1016,8 +1033,8 @@ Answer:
 
         return {
             "response_mode": "analysis",
-            "current_user": self.current_user,
             "analysis_text": analysis_text,
+            "current_user": self.current_user,
             "system_status": status,
             "confidence": round(confidence_score / 100.0, 2),
             "confidence_score": confidence_score,
@@ -1151,7 +1168,9 @@ Answer:
         }
 
     def _generate_fixed_code_only(self, original_code: str, language: str) -> str:
-        code_for_prompt = original_code[:2200] if len(original_code) > 2200 else original_code
+        if len(original_code) > self.REVIEW_PROMPT_MAX_CHARS:
+            return ""
+        code_for_prompt = original_code
         prompt = (
             f"You are a senior {language} engineer.\n"
             f"Return a fully corrected version of this {language} code.\n"
@@ -1163,7 +1182,7 @@ Answer:
             "- Avoid introducing new global mutable state\n"
             "- Keep behavior correct and improve algorithmic efficiency when obvious\n"
             "- Preserve intent while fixing bugs, edge cases, and robustness\n\n"
-            f"{code_for_prompt}\n"
+            f"{UNTRUSTED_CODE_RULE}\n{fence_untrusted_code(code_for_prompt)}\n"
         )
 
         best_candidate = ""
@@ -2285,13 +2304,21 @@ IMPORTANT:
         if key not in self._review_response_cache:
             return None
         value = self._review_response_cache.pop(key)
+        created_at = float(value.get("_cache_created_at", 0.0))
+        if created_at <= 0 or time.time() - created_at >= self.config.cache_ttl_seconds:
+            return None
         self._review_response_cache[key] = value
         return value
 
     def _review_cache_set(self, key: str, value: dict[str, Any]) -> None:
         if key in self._review_response_cache:
             self._review_response_cache.pop(key)
-        self._review_response_cache[key] = copy.deepcopy(value)
+        # A temporary model outage must not outlive the outage through the cache.
+        if value.get("analysis_source") != "llm":
+            return
+        stored = copy.deepcopy(value)
+        stored["_cache_created_at"] = time.time()
+        self._review_response_cache[key] = stored
         while len(self._review_response_cache) > max(20, self.config.cache_size // 2):
             self._review_response_cache.popitem(last=False)
         self._save_review_cache_disk()
