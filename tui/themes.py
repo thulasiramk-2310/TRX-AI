@@ -38,18 +38,18 @@ HOLO = Theme(
 
 OPS = Theme(
     name="trx-ops",
-    primary="#F2B84B",
-    secondary="#4FD1A5",
-    accent="#8FB6FF",
-    foreground="#D7E0EE",
-    background="#070B14",
-    surface="#0D1524",
-    panel="#14213A",
-    success="#4FD1A5",
-    warning="#F2B84B",
-    error="#FF6B6B",
+    primary="#B5C4DC",
+    secondary="#8894A8",
+    accent="#B5C4DC",
+    foreground="#D9DEE7",
+    background="#0F1115",
+    surface="#15181E",
+    panel="#1C2027",
+    success="#8ABB99",
+    warning="#D6B578",
+    error="#E88888",
     dark=True,
-    variables={"block-cursor-background": "#F2B84B", "footer-key-foreground": "#F2B84B"},
+    variables={"block-cursor-background": "#B5C4DC", "footer-key-foreground": "#B5C4DC"},
 )
 
 THEMES = (NEON, HOLO, OPS)

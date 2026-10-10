@@ -11,17 +11,18 @@ from __future__ import annotations
 
 import difflib
 import io
+from pathlib import Path
 import time
 from typing import Any
 
 from rich.console import Console, Group
+from rich.markup import escape
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.color import Color
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Resize
 from textual.screen import ModalScreen
@@ -45,6 +46,7 @@ HELP_TEXT = """\
 | anything else | ask TRX a question |
 | `clear` | clear the conversation |
 | `theme` | switch colour theme (or press **F2**) |
+| `inspect` | show or hide diagnostics (or press **F3**) |
 | `exit` | quit (or **Ctrl+Q**) |
 
 Use **Tab** and arrow keys to navigate the sidebar; **Enter** selects an action.
@@ -54,19 +56,6 @@ Classic scrolling CLI, including history and benchmarks: `trx --classic`.
 
 # Shared helpers from the classic renderer, so both UIs pick sections the same way.
 _HELPER = OutputFormatter(Console(file=io.StringIO(), width=120))
-
-
-def _ramp(app: App, text: str) -> Text:
-    """Gradient across the theme's primary -> secondary -> accent colours."""
-    theme = app.current_theme
-    stops = [Color.parse(theme.primary), Color.parse(theme.secondary), Color.parse(theme.accent)]
-    out = Text()
-    n = max(1, len(text) - 1)
-    for i, ch in enumerate(text):
-        t = i / n * (len(stops) - 1)
-        lo = min(int(t), len(stops) - 2)
-        out.append(ch, style=f"bold {stops[lo].blend(stops[lo + 1], t - lo).hex}")
-    return out
 
 
 def _source_label(result: dict[str, Any]) -> str:
@@ -97,9 +86,7 @@ def _status_value(result: dict[str, Any], key: str) -> str:
 
 
 class Masthead(Static):
-    """Wordmark + live status lights (redraws once a second inside the app, never in scrollback)."""
-
-    LOGO = ("▀█▀ █▀█ ▀▄▀", " █  █▀▄ █ █")
+    """Compact workspace status; detailed diagnostics live in the inspector."""
 
     def on_mount(self) -> None:
         self.set_interval(1, self.refresh)
@@ -107,41 +94,19 @@ class Masthead(Static):
     def render(self) -> Table:
         theme = self.app.current_theme
         status = getattr(self.app, "sys_status", None)
-        if self.size.width < 90:
-            compact = Table.grid(expand=True)
-            compact.add_column()
-            compact.add_row(_ramp(self.app, "TRX  ·  local AI engineering assistant"))
-            if status is None:
-                compact.add_row(Text("SYSTEM booting…", style=theme.warning))
-            else:
-                state = "connected" if status.llm_reachable else ("offline" if status.llm_enabled else "disabled")
-                compact.add_row(Text(f"LLM {status.model} · {state} · {status.compute}"))
-            return compact
         grid = Table.grid(expand=True)
-        grid.add_column(width=14)
         grid.add_column(ratio=1)
         grid.add_column(justify="right")
-        tagline = Text.assemble(
-            ("T H I N K  ·  R E A S O N  ·  E X E C U T E\n", f"bold {theme.foreground}"),
-            ("local AI engineering assistant  //  v0.2", "dim"),
-        )
-
-        def led(label: str, value: str, color: str) -> Text:
-            return Text.assemble(("● ", color), (f"{label} ", "dim"), (value, f"bold {theme.foreground}"))
-
+        workspace = getattr(self.app, "workspace_name", "workspace")
+        title = Text.assemble(("TRX", f"bold {theme.primary}"), (f"  /  {workspace}", theme.foreground))
         if status is None:
-            lights = Group(Text.assemble(led("SYSTEM", "booting…", theme.warning)), Text(""))
+            detail = Text("starting engine", style=theme.warning)
         else:
-            llm_color = theme.success if status.llm_reachable else (theme.warning if not status.llm_enabled else theme.error)
-            llm_value = status.model if status.llm_enabled else f"{status.model} (off)"
-            compute_color = theme.success if status.compute == "GPU" else theme.warning
-            graph_color = theme.success if status.graph == "ready" else theme.warning
-            lights = Group(
-                Text.assemble(led("LLM", llm_value, llm_color), "   ", led("COMPUTE", status.compute, compute_color)),
-                Text.assemble(led("GRAPH", status.graph, graph_color), "   ", led("MODE", status.mode, theme.primary),
-                              "   ", (time.strftime("%H:%M:%S"), f"bold {theme.primary}")),
-            )
-        grid.add_row(Group(*(_ramp(self.app, line) for line in self.LOGO)), tagline, lights)
+            state = "ready" if status.llm_reachable else ("offline" if status.llm_enabled else "disabled")
+            detail = Text.assemble((status.model, theme.foreground), (f"  {state}", theme.success if status.llm_reachable else theme.warning))
+            if self.size.width >= 90:
+                detail.append(f"  ·  {status.compute}  ·  graph {status.graph}", style="dim")
+        grid.add_row(title, detail)
         return grid
 
 
@@ -149,13 +114,13 @@ class ReviewCard(Static):
     """One code review: confidence bar and Issues / Fixes / Performance / Summary sections."""
 
     COLORS = {"Issues": "error", "Fixes": "success", "Performance": "warning", "Summary": "accent"}
-    ICONS = {"Issues": "✗", "Fixes": "✓", "Performance": "↯", "Summary": "→"}
+    ICONS = {"Issues": "!", "Fixes": "+", "Performance": "~", "Summary": ">"}
 
     def __init__(self, result: dict[str, Any]) -> None:
         super().__init__(classes="review-card")
         self.result = result
         verb, _, target = str(result.get("current_input", "review")).partition(" ")
-        self.border_title = f" ◢ {verb.upper() or 'REVIEW'} ▸ {target or 'code'} "
+        self.border_title = f" {verb.upper() or 'REVIEW'}  {escape(target or 'code')} "
         context = _HELPER._graph_context_summary(result)
         self.border_subtitle = f" {_meta(result)}{' · ' + context if context else ''} "
 
@@ -164,19 +129,14 @@ class ReviewCard(Static):
         blocks: list[Any] = []
         score = self.result.get("confidence_score")
         if isinstance(score, (int, float)):
-            filled = max(0, min(10, round(score / 10)))
-            bar = Text("confidence ", style="dim")
-            bar.append_text(_ramp(self.app, "▰" * filled))
-            bar.append("▱" * (10 - filled), style="dim")
-            bar.append(f" {int(score)}%", style=f"bold {t.foreground}")
-            blocks += [bar, Text("")]
+            blocks += [Text(f"Confidence {int(score)}%", style="dim"), Text("")]
         sections = [s for s in _HELPER._review_sections(self.result) if s[3]]
         for label, _icon, _color, items in sections:
             color = getattr(t, self.COLORS.get(label, "primary")) or t.primary
             table = Table.grid(padding=(0, 1))
             table.add_column(width=2)
             table.add_column(ratio=1)
-            table.add_row(Text("▸", style=t.secondary), Text(label.upper(), style=f"bold {color}"))
+            table.add_row(Text(""), Text(label, style=f"bold {t.foreground}"))
             for item in items:
                 table.add_row(Text(self.ICONS.get(label, "•"), style=f"bold {color}"),
                               _HELPER._inline(item))
@@ -245,6 +205,7 @@ class TRXApp(App):
     TITLE = "TRX"
     BINDINGS = [
         ("f2", "cycle_theme", "Theme"),
+        ("f3", "toggle_inspector", "Inspect"),
         Binding("ctrl+l", "focus_command", "Command", priority=True),
         ("ctrl+q", "quit", "Quit"),
     ]
@@ -256,6 +217,11 @@ class TRXApp(App):
         self.engine = engine
         self.sys_status = None
         self.busy = False
+        self.workspace_name = Path.cwd().name or "workspace"
+        self.inspector_visible = False
+        self._busy_started_at = 0.0
+        self._busy_label = ""
+        self._command_hint: Static | None = None
 
     # -- layout ------------------------------------------------------------------------
 
@@ -263,27 +229,28 @@ class TRXApp(App):
         yield Masthead(id="masthead")
         with Horizontal(id="body"):
             with Vertical(id="nav"):
-                yield Static("NAVIGATE", classes="nav-label")
-                yield OptionList(*(Option(f"◈  {label}", id=key) for key, label in NAV), id="nav-list")
+                yield Static("WORKSPACE", classes="nav-label")
+                yield OptionList(*(Option(label, id=key) for key, label in NAV), id="nav-list")
                 yield Static("SESSION", classes="nav-label")
                 yield Static("", id="session")
             yield VerticalScroll(id="stream")
             with VerticalScroll(id="telemetry"):
                 confidence = Vertical(Digits("--", id="confidence-digits"), classes="tile", id="confidence")
-                confidence.border_title = "CONFIDENCE"
+                confidence.border_title = "Confidence"
                 yield confidence
                 latency = Vertical(Sparkline([0.0], id="latency-spark"), Static("", id="latency-text"), classes="tile")
-                latency.border_title = "LLM LATENCY"
+                latency.border_title = "Response time"
                 yield latency
                 pipeline = Vertical(Static("[dim]idle[/]", id="pipeline-text"),
                                     ProgressBar(total=1, show_eta=False, show_percentage=False, id="pipeline-bar"),
                                     classes="tile")
-                pipeline.border_title = "AGENT PIPELINE"
+                pipeline.border_title = "Review pipeline"
                 yield pipeline
                 guard = Vertical(Static("[dim]no checks yet[/]", id="guard-text"), classes="tile")
-                guard.border_title = "GUARDRAILS"
+                guard.border_title = "Safety checks"
                 yield guard
-        yield Input(placeholder="Ask TRX, or type review <file>, fix <file>, help …", id="command")
+        yield Static("Enter submit   ·   Ctrl+L focus   ·   F3 diagnostics", id="command-hint")
+        yield Input(placeholder="Ask a question or enter a command…", id="command")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -291,6 +258,10 @@ class TRXApp(App):
             self.register_theme(theme)
         self.theme = self._initial_theme
         self.query_one("#command", Input).focus()
+        self.query_one("#command", Input).border_title = " Command "
+        self.screen.set_class(self.inspector_visible, "inspecting")
+        self._command_hint = self.query_one("#command-hint", Static)
+        self.set_interval(1, self._refresh_command_hint)
         self._update_session()
         if self.demo:
             from tui.demo import DEMO_STATUS, demo_results
@@ -300,6 +271,13 @@ class TRXApp(App):
                 self._add_user(prompt)
                 self.show_result(result, for_fix=False)
             return
+        self._mount(Static(Text.assemble(
+            ("Workspace ready", "bold"),
+            "\n\nAsk a development question, or inspect a file.\n\n",
+            ("review path/to/file.py", "bold"), "   review code\n",
+            ("fix path/to/file.py", "bold"), "      preview a patch\n",
+            ("help", "bold"), "                     commands and shortcuts",
+        ), id="welcome"))
         if self.engine is None:
             self._note("Starting TRX engine…", "dim")
             self.boot()
@@ -380,6 +358,8 @@ class TRXApp(App):
         if not raw:
             return
         text = normalize_command(raw)
+        if text.startswith("/") and text[1:].partition(" ")[0].lower() in {"clear", "theme", "inspect"}:
+            text = text[1:]
         command, _, arg = text.partition(" ")
         command = command.lower()
         if command in {"exit", "quit"}:
@@ -391,14 +371,19 @@ class TRXApp(App):
         if command == "theme":
             self.action_cycle_theme()
             return
+        if command == "inspect":
+            self.action_toggle_inspector()
+            return
         if command == "help":
             self._add_user(raw)
             self._mount(Markdown(HELP_TEXT, classes="answer"))
             return
         if self.engine is None:
+            event.input.value = raw
             self._note("Engine is still starting; try again in a moment.", "warning")
             return
         if self.busy:
+            event.input.value = raw
             self._note("Still working on the previous request.", "warning")
             return
         self._add_user(raw)
@@ -416,6 +401,7 @@ class TRXApp(App):
 
     def show_result(self, result: dict[str, Any], for_fix: bool = False) -> None:
         self.busy = False
+        self._refresh_command_hint()
         if result.get("response_mode") == "analysis":
             self._mount(ReviewCard(result))
             fixed = str(result.get("fixed_code", "")).strip()
@@ -499,8 +485,8 @@ class TRXApp(App):
             self.query_one("#session", Static).update("[dim]no runs yet[/]")
             return
         self.query_one("#session", Static).update(
-            f"[b]{stats.runs}[/] runs   [b]{stats.reviews}[/] reviews\n"
-            f"[dim]avg[/] [b]{stats.avg_latency:.1f}s[/]   [dim]cache[/] [b]{stats.cache_rate:.0%}[/]")
+            Text(f"Runs     {stats.runs}\nReviews  {stats.reviews}\n"
+                 f"Cache    {stats.cache_rate:.0%}\nAverage  {stats.avg_latency:.1f}s"))
 
     # -- small helpers -------------------------------------------------------------------------
 
@@ -510,7 +496,9 @@ class TRXApp(App):
         stream.scroll_end(animate=False)
 
     def _add_user(self, text: str) -> None:
-        self._mount(Static(f"◈  {text}", classes="user-msg", markup=False))
+        for welcome in self.query("#welcome"):
+            welcome.remove()
+        self._mount(Static(f"> {text}", classes="user-msg", markup=False))
 
     def _note(self, text: str, level: str = "dim") -> None:
         color = {"error": "red", "warning": "yellow", "success": "green"}.get(level, "")
@@ -519,14 +507,28 @@ class TRXApp(App):
 
     def _start_busy(self, label: str) -> None:
         self.busy = True
+        self._busy_started_at = time.monotonic()
+        self._busy_label = label
+        self._refresh_command_hint()
         self.query_one("#pipeline-text", Static).update(Text.assemble(("◐ ", "yellow"), "working: ", (label, "bold")))
         self.query_one("#pipeline-bar", ProgressBar).update(total=None)
 
     def _finish_error(self, message: str) -> None:
         self.busy = False
+        self._refresh_command_hint()
         self.query_one("#pipeline-text", Static).update("[red]✗[/] failed")
         self.query_one("#pipeline-bar", ProgressBar).update(total=1, progress=0)
         self._note(message, "error")
+
+    def _refresh_command_hint(self) -> None:
+        if self._command_hint is None or not self._command_hint.is_mounted:
+            return
+        if self.busy:
+            elapsed = max(0, int(time.monotonic() - self._busy_started_at))
+            hint = Text.assemble(("Working", "bold"), f"  ·  {self._busy_label}  ·  {elapsed}s")
+        else:
+            hint = Text("Enter submit   ·   Ctrl+L focus   ·   F3 diagnostics")
+        self._command_hint.update(hint)
 
     def action_cycle_theme(self) -> None:
         names = [t.name for t in THEMES]
@@ -534,6 +536,12 @@ class TRXApp(App):
 
     def action_focus_command(self) -> None:
         self.query_one("#command", Input).focus()
+
+    def action_toggle_inspector(self) -> None:
+        self.inspector_visible = not self.inspector_visible
+        self.screen_stack[0].set_class(self.inspector_visible, "inspecting")
+        if self.inspector_visible and self.size.width < 120:
+            self._note("Diagnostics need at least 120 terminal columns. Widen the terminal to show them.", "dim")
 
 
 def main() -> None:

@@ -61,6 +61,16 @@ async def submit(pilot, app: TRXApp, text: str) -> None:
 
 
 class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
+    async def test_busy_feedback_and_preserved_pending_input(self) -> None:
+        app = TRXApp(engine=FakeEngine())
+        async with app.run_test(size=(80, 24)) as pilot:
+            app._start_busy("review app.py")
+            self.assertIn("Working", str(app.query_one("#command-hint", Static).render()))
+            await submit(pilot, app, "next question")
+            self.assertEqual(app.query_one("#command", Input).value, "next question")
+            app._finish_error("Model unavailable")
+            self.assertIn("Enter submit", str(app.query_one("#command-hint", Static).render()))
+
     async def test_sidebar_keyboard_navigation_and_command_shortcut(self) -> None:
         app = TRXApp(engine=FakeEngine())
         async with app.run_test(size=(140, 40)) as pilot:
@@ -99,7 +109,33 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(app.query_one("#telemetry").display)
             await pilot.resize_terminal(140, 40)
             await pilot.pause()
+            self.assertFalse(app.query_one("#telemetry").display)
+            await pilot.press("f3")
             self.assertTrue(app.query_one("#telemetry").display)
+
+    async def test_diagnostics_are_optional_and_persist_across_resize(self) -> None:
+        app = TRXApp(engine=FakeEngine())
+        async with app.run_test(size=(140, 40)) as pilot:
+            self.assertFalse(app.query_one("#telemetry").display)
+            self.assertGreaterEqual(app.query_one("#stream").size.width, 100)
+            await pilot.press("f3")
+            self.assertTrue(app.query_one("#telemetry").display)
+            await pilot.resize_terminal(80, 24)
+            await pilot.pause()
+            self.assertFalse(app.query_one("#telemetry").display)
+            await pilot.resize_terminal(140, 40)
+            await pilot.pause()
+            self.assertTrue(app.query_one("#telemetry").display)
+            await submit(pilot, app, "/inspect")
+            self.assertFalse(app.query_one("#telemetry").display)
+            self.assertFalse(app.busy)
+
+    async def test_welcome_disappears_on_first_request(self) -> None:
+        app = TRXApp(engine=FakeEngine())
+        async with app.run_test(size=(80, 24)) as pilot:
+            self.assertTrue(app.query("#welcome"))
+            await submit(pilot, app, "hello")
+            self.assertFalse(app.query("#welcome"))
 
     async def test_escape_cancels_normal_and_blocked_fixes(self) -> None:
         for findings in ([], [Finding("block", "Fix introduces eval()")]):
@@ -108,6 +144,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(80, 24)) as pilot:
                 await submit(pilot, app, "fix app.py")
                 self.assertIsInstance(app.screen, ConfirmFix)
+                app._refresh_command_hint()
                 await pilot.press("escape")
                 await pilot.pause()
                 self.assertEqual(len(app.screen_stack), 1)
