@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from textual.widgets import Button, Digits, Input, Markdown, Static
+from textual.widgets import Button, Digits, Input, Markdown, OptionList, Static
 
 from guardrails import Finding
 from tui.app import ConfirmFix, Patch, ReviewCard, TRXApp
@@ -61,6 +61,78 @@ async def submit(pilot, app: TRXApp, text: str) -> None:
 
 
 class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sidebar_keyboard_navigation_and_command_shortcut(self) -> None:
+        app = TRXApp(engine=FakeEngine())
+        async with app.run_test(size=(140, 40)) as pilot:
+            nav = app.query_one("#nav-list", OptionList)
+            command = app.query_one("#command", Input)
+            nav.focus()
+            nav.highlighted = 0
+            await pilot.press("down", "enter")
+            self.assertIs(app.focused, command)
+            self.assertEqual(command.value, "review ")
+            nav.focus()
+            nav.highlighted = 2
+            await pilot.press("enter")
+            self.assertEqual(command.value, "fix ")
+            nav.focus()
+            await pilot.press("ctrl+l")
+            self.assertIs(app.focused, command)
+            nav.focus()
+            nav.highlighted = 3
+            await pilot.press("enter")
+            self.assertTrue(any("review <file" in m._markdown for m in app.query(Markdown)))
+            self.assertNotIn("SRE", " ".join(m._markdown for m in app.query(Markdown)))
+
+    async def test_resize_preserves_readable_transcript(self) -> None:
+        app = TRXApp(engine=FakeEngine())
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            self.assertFalse(app.query_one("#nav").display)
+            self.assertFalse(app.query_one("#telemetry").display)
+            self.assertGreaterEqual(app.query_one("#stream").size.width, 70)
+            await submit(pilot, app, "hello")
+            self.assertTrue(app.query(Markdown))
+            await pilot.resize_terminal(100, 30)
+            await pilot.pause()
+            self.assertTrue(app.query_one("#nav").display)
+            self.assertFalse(app.query_one("#telemetry").display)
+            await pilot.resize_terminal(140, 40)
+            await pilot.pause()
+            self.assertTrue(app.query_one("#telemetry").display)
+
+    async def test_escape_cancels_normal_and_blocked_fixes(self) -> None:
+        for findings in ([], [Finding("block", "Fix introduces eval()")]):
+            engine = FakeEngine(findings=findings)
+            app = TRXApp(engine=engine)
+            async with app.run_test(size=(80, 24)) as pilot:
+                await submit(pilot, app, "fix app.py")
+                self.assertIsInstance(app.screen, ConfirmFix)
+                await pilot.press("escape")
+                await pilot.pause()
+                self.assertEqual(len(app.screen_stack), 1)
+                self.assertEqual(engine.applied, [])
+                self.assertIs(app.focused, app.query_one("#command", Input))
+
+    async def test_zero_confidence_is_displayed(self) -> None:
+        app = TRXApp(engine=FakeEngine())
+        async with app.run_test(size=(140, 40)) as pilot:
+            app.show_result(dict(REVIEW, confidence_score=0, intent_confidence=0.9))
+            await pilot.pause()
+            self.assertEqual(str(app.query_one("#confidence-digits", Digits).value), "0%")
+
+    async def test_path_markup_is_displayed_literally(self) -> None:
+        engine = FakeEngine()
+        app = TRXApp(engine=engine)
+        async with app.run_test(size=(140, 40)) as pilot:
+            app._start_busy("review [red]app[/red].py")
+            await pilot.pause()
+            self.assertIn("[red]app[/red].py", str(app.query_one("#pipeline-text", Static).render()))
+            app.busy = False
+            await submit(pilot, app, "fix [red]app[/red].py")
+            self.assertIn("[red]app[/red].py", str(app.screen.query_one("#confirm-title", Static).render()))
+            await pilot.press("escape")
+
     async def test_help_and_chat(self) -> None:
         engine = FakeEngine()
         app = TRXApp(engine=engine)

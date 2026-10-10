@@ -20,8 +20,10 @@ from rich.table import Table
 from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.color import Color
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.events import Resize
 from textual.screen import ModalScreen
 from textual.widgets import Button, Digits, Footer, Input, Markdown, OptionList, ProgressBar, Sparkline, Static
 from textual.widgets.option_list import Option
@@ -32,8 +34,7 @@ from guardrails import Finding, strip_terminal_controls
 from tui.themes import THEMES
 
 DEFAULT_THEME = "trx-ops"
-NAV = (("chat", "Chat"), ("review", "Code review"), ("sre", "Autonomous SRE"),
-       ("history", "History"), ("eval", "Evaluation"))
+NAV = (("chat", "Chat"), ("review", "Code review"), ("fix", "Generate fix"), ("help", "Help"))
 HELP_TEXT = """\
 **Commands** (type in the bar below; a leading `/` is optional)
 
@@ -46,7 +47,9 @@ HELP_TEXT = """\
 | `theme` | switch colour theme (or press **F2**) |
 | `exit` | quit (or **Ctrl+Q**) |
 
-Classic scrolling CLI: `trx --classic`. SRE benchmark: `trx sre list`.
+Use **Tab** and arrow keys to navigate the sidebar; **Enter** selects an action.
+**Ctrl+L** returns to the command bar. **Escape** cancels a fix confirmation.
+Classic scrolling CLI, including history and benchmarks: `trx --classic`.
 """
 
 # Shared helpers from the classic renderer, so both UIs pick sections the same way.
@@ -104,6 +107,16 @@ class Masthead(Static):
     def render(self) -> Table:
         theme = self.app.current_theme
         status = getattr(self.app, "sys_status", None)
+        if self.size.width < 90:
+            compact = Table.grid(expand=True)
+            compact.add_column()
+            compact.add_row(_ramp(self.app, "TRX  ·  local AI engineering assistant"))
+            if status is None:
+                compact.add_row(Text("SYSTEM booting…", style=theme.warning))
+            else:
+                state = "connected" if status.llm_reachable else ("offline" if status.llm_enabled else "disabled")
+                compact.add_row(Text(f"LLM {status.model} · {state} · {status.compute}"))
+            return compact
         grid = Table.grid(expand=True)
         grid.add_column(width=14)
         grid.add_column(ratio=1)
@@ -150,7 +163,7 @@ class ReviewCard(Static):
         t = self.app.current_theme
         blocks: list[Any] = []
         score = self.result.get("confidence_score")
-        if isinstance(score, (int, float)) and score:
+        if isinstance(score, (int, float)):
             filled = max(0, min(10, round(score / 10)))
             bar = Text("confidence ", style="dim")
             bar.append_text(_ramp(self.app, "▰" * filled))
@@ -192,6 +205,8 @@ class Patch(Static):
 class ConfirmFix(ModalScreen[bool]):
     """Asks before saving a fix. A blocked fix needs the word 'force' typed, not a reflexive click."""
 
+    BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
+
     def __init__(self, target: str, findings: list[Finding]) -> None:
         super().__init__()
         self.target = target
@@ -200,13 +215,13 @@ class ConfirmFix(ModalScreen[bool]):
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm"):
             if self.blocking:
-                yield Static(f"[b]Guardrails blocked this fix[/b] for {self.target}", id="confirm-title")
+                yield Static(Text.assemble(("Guardrails blocked this fix", "bold"), f" for {self.target}"), id="confirm-title")
                 for f in self.blocking:
-                    yield Static(f"  ✗ {f.message}", classes="confirm-finding")
+                    yield Static(Text(f"  ✗ {f.message}"), classes="confirm-finding")
                 yield Static("Type [b]force[/b] to save it anyway, or press Cancel.", classes="confirm-hint")
                 yield Input(placeholder="force", id="force-input")
             else:
-                yield Static(f"[b]Save the fix?[/b]  It is written next to {self.target} as *_fixed.", id="confirm-title")
+                yield Static(Text.assemble(("Save the fix?", "bold"), f"  It is written next to {self.target} as *_fixed."), id="confirm-title")
             with Horizontal(id="confirm-buttons"):
                 yield Button("Save fix", variant="warning" if self.blocking else "success", id="save",
                              disabled=bool(self.blocking))
@@ -218,6 +233,9 @@ class ConfirmFix(ModalScreen[bool]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "save")
 
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
 
 # ----------------------------------------------------------------------------------- app
 
@@ -227,7 +245,7 @@ class TRXApp(App):
     TITLE = "TRX"
     BINDINGS = [
         ("f2", "cycle_theme", "Theme"),
-        ("ctrl+l", "focus_command", "Command"),
+        Binding("ctrl+l", "focus_command", "Command", priority=True),
         ("ctrl+q", "quit", "Quit"),
     ]
 
@@ -288,6 +306,23 @@ class TRXApp(App):
         else:
             self.refresh_status()
         self.set_interval(20, self.refresh_status)
+
+    def on_resize(self, event: Resize) -> None:
+        screen = self.screen_stack[0]
+        screen.set_class(event.size.width < 120, "compact")
+        screen.set_class(event.size.width < 90, "narrow")
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        command = self.query_one("#command", Input)
+        action = event.option.id
+        if action == "help":
+            self._mount(Markdown(HELP_TEXT, classes="answer"))
+        elif action in {"review", "fix"}:
+            command.value = f"{action} "
+            command.cursor_position = len(command.value)
+        elif action == "chat":
+            command.value = ""
+        command.focus()
 
     # -- workers (run off the UI thread) ---------------------------------------------------
 
@@ -418,10 +453,10 @@ class TRXApp(App):
 
     def _update_telemetry(self, result: dict[str, Any]) -> None:
         score = result.get("confidence_score")
-        if not isinstance(score, (int, float)) or not score:
+        if not isinstance(score, (int, float)):
             conf = result.get("intent_confidence")
             score = round(float(conf) * 100) if isinstance(conf, (int, float)) else None
-        self.query_one("#confidence-digits", Digits).update(f"{int(score)}%" if score else "--")
+        self.query_one("#confidence-digits", Digits).update(f"{int(score)}%" if isinstance(score, (int, float)) else "--")
 
         stats = getattr(self.engine, "stats", None)
         latencies = list(getattr(stats, "latencies", []) or [])
@@ -484,7 +519,7 @@ class TRXApp(App):
 
     def _start_busy(self, label: str) -> None:
         self.busy = True
-        self.query_one("#pipeline-text", Static).update(f"[yellow]◐[/] working: [b]{label}[/]")
+        self.query_one("#pipeline-text", Static).update(Text.assemble(("◐ ", "yellow"), "working: ", (label, "bold")))
         self.query_one("#pipeline-bar", ProgressBar).update(total=None)
 
     def _finish_error(self, message: str) -> None:

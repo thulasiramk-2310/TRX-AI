@@ -16,6 +16,9 @@ Screen {
     height: 1fr;
 }
 
+Screen.compact #telemetry { display: none; }
+Screen.narrow #nav { display: none; }
+
 /* ---- left: navigation ---------------------------------------------------------- */
 #nav {
     width: 26;
@@ -146,7 +149,10 @@ ConfirmFix {
 }
 #confirm {
     width: 72;
+    max-width: 100%;
     height: auto;
+    max-height: 100%;
+    overflow-y: auto;
     padding: 1 2;
     background: $surface;
     border: panel $warning;
