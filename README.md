@@ -149,6 +149,7 @@ Answers print into a scrolling transcript; the screen is never cleared.
 - **Chat answers** render as Markdown, followed by one muted line: model · time · source (`llm`, `built-in knowledge`, or `rule fallback`).
 - **Code reviews** render as plain sections (Issues / Fixes / Performance / Summary) with a confidence score. There are no boxes, so copied text stays clean. See [docs/ui.md](docs/ui.md) for the design rules and the user feedback behind them, and [docs/guardrails.md](docs/guardrails.md) for safety checks (secret redaction, fix vetting, prompt-injection fencing).
 - **Fixes** show as a colored diff against your file (`+added -removed`), or "no code changes suggested". You never get a full copy of an unchanged file.
+- Reviews longer than 2,500 characters use only the input prefix and explicitly report that limit. Whole-file fixes are withheld for these inputs; review a smaller file or function to generate a fix.
 - **Structured logs** go to `sessions/trx_events.jsonl` instead of the terminal. Set `RD_STRUCTURED_LOGS=stdout` to print them, or `false` to turn them off.
 
 ---
@@ -179,6 +180,7 @@ Runtime:
 - Rule-first routing with semantic enhancement
 - Retry/backoff for local LLM calls
 - Deterministic in-memory cache TTL
+- Review results expire with the configured cache TTL; temporary model failures are retried rather than cached. Chat caches and conversation context are scoped by user and personality, and guest retrieval searches only guest memories.
 - Structured runtime events (`intent_route`, `response_runtime`)
 - First-class breaker and MCP status in outputs
 - Graceful degraded-mode fallbacks
@@ -251,8 +253,14 @@ RD_REVIEW_LOGS=false
 3. Run:
 
 ```bash
-trx            # or: python main.py
+trx              # full-screen app (Mission Ops theme; F2 switches theme)
+trx --classic    # classic scrolling CLI (also used automatically when output is piped)
 ```
+
+The full-screen app has a live header (LLM, GPU/CPU, code graph, mode), a navigation sidebar, the
+conversation and review cards with diffs, and a telemetry panel (confidence, LLM latency, agent
+pipeline, guardrails). `fix <file>` opens a confirmation dialog; a fix blocked by guardrails needs
+`force` typed before it can be saved.
 
 ---
 

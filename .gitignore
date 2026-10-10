@@ -8,7 +8,6 @@ reports/
 # Session/runtime outputs
 sessions/
 *.log
-/.code-review-graph
 *.tmp
 *.bak
 *.swp
@@ -37,18 +36,7 @@ Thumbs.db
 # Generated fixed files (optional)
 *_fixed.py
 
-# AI agent / assistant tool files (never tracked)
-.claude/
-CLAUDE.md
-CLAUDE.local.md
-AGENTS.md
-GEMINI.md
-.cursor/
-.cursorrules
-.github/copilot-instructions.md
-.aider*
-.devreplay/
-.evolith/
+# Tool caches
 .ruff_cache/
 
 # Build outputs
