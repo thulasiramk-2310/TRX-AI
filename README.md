@@ -262,6 +262,11 @@ conversation and review cards with diffs, and a telemetry panel (confidence, LLM
 pipeline, guardrails). `fix <file>` opens a confirmation dialog; a fix blocked by guardrails needs
 `force` typed before it can be saved.
 
+Use Tab and arrow keys to navigate the sidebar, Enter to select, Ctrl+L to focus
+the command bar, and Escape to cancel a fix confirmation. The app hides side panels
+in narrower terminals to keep the conversation readable. History and benchmarks
+are available through the classic CLI.
+
 ---
 
 ## Project Structure

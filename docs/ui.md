@@ -1,6 +1,24 @@
-# CLI UI design
+# Terminal UI design
 
-TRX prints into the terminal's normal scrollback, like a shell. These rules come from public
+`trx` opens the full-screen app in an interactive terminal. `trx --classic` uses the
+scrolling CLI described below; piped output also uses the classic CLI.
+
+## Full-screen app
+
+- The sidebar provides Chat, Code review, Generate fix, and Help shortcuts. Use Tab
+  to focus it, arrow keys to move, and Enter to select. Review and fix fill the
+  command bar so you can add the target path before submitting.
+- Ctrl+L focuses the command bar, F2 cycles the three themes, and Ctrl+Q quits.
+- Fixes show a diff before the save dialog. Escape or Cancel dismisses the dialog
+  without writing a file; blocked fixes require typing `force` to enable Save.
+- Below 120 columns the telemetry panel is hidden; below 90 columns the sidebar is
+  also hidden. All commands remain available in the command bar.
+- History, evaluation, and other classic CLI operations remain available through
+  `trx --classic`; the full-screen sidebar lists its implemented actions.
+
+## Classic CLI
+
+The classic CLI prints into the terminal's normal scrollback, like a shell. These rules come from public
 feedback on Claude Code, Codex CLI, Gemini CLI and Copilot CLI. Please keep them when you change
 `formatter.py`, `cli_input.py` or the loop in `main.py`.
 
@@ -12,7 +30,7 @@ feedback on Claude Code, Codex CLI, Gemini CLI and Copilot CLI. Please keep them
 | Flicker during output on Windows ([claude-code#16939](https://github.com/anthropics/claude-code/issues/16939)) | Live regions repainting many times per second | There are no live regions. |
 | Copied text includes border characters `│ ┃` ([copilot-cli#4116](https://github.com/github/copilot-cli/issues/4116)) | Answers drawn inside boxes | Answers have no boxes. Sections are a coloured heading plus indented lines, and the fixed code has no line numbers. |
 | The screen shifts up and down at the prompt ([prompt_toolkit#1249](https://github.com/prompt-toolkit/python-prompt-toolkit/issues/1249)) | Reserved completion-menu space, a bottom toolbar, and a popup that opens on every keystroke | `reserve_space_for_menu=0`, no bottom toolbar, and Tab-only readline-style completion. Status sits in a dim right-hand prompt on the same line. |
-| Lost scrollback history ([codex#35335](https://github.com/openai/codex/issues/35335)) | Alternate screen buffer or clearing the screen | TRX never clears the screen and never uses the alternate screen. |
+| Lost scrollback history ([codex#35335](https://github.com/openai/codex/issues/35335)) | Alternate screen buffer or clearing the screen | The classic CLI never clears the screen and never uses the alternate screen. |
 | Blank or garbled lines after resizing the window | Lines padded with spaces up to the terminal width | Trailing padding is stripped before writing. |
 
 What users praise: output that stays in the native scrollback, so select, scroll and find
