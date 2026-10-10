@@ -46,7 +46,7 @@ jobs:
           cache-dependency-path: requirements*.txt
       - run: pip install -r requirements-dev.txt
       - name: Unit tests with coverage
-        run: pytest --cov --cov-report=term --cov-report=xml
+        run: python -m pytest --cov --cov-report=term --cov-report=xml
       - name: Benchmark dataset sanity check
         run: python -c "from evaluation import load_dataset; cases = load_dataset(); assert len(cases) >= 50, len(cases); print(len(cases), 'cases')"
       - name: Smoke E2E (no LLM)
