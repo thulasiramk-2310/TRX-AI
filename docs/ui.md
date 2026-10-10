@@ -9,9 +9,15 @@ scrolling CLI described below; piped output also uses the classic CLI.
   to focus it, arrow keys to move, and Enter to select. Review and fix fill the
   command bar so you can add the target path before submitting.
 - Ctrl+L focuses the command bar, F2 cycles the three themes, and Ctrl+Q quits.
+- The default workspace theme uses neutral surfaces and a single muted accent.
+  Reviews and patches use quiet separators; conversation text uses the full available width.
+- F3 or `inspect` toggles the diagnostics inspector. It starts hidden so the
+  transcript has more room. Resizing preserves your preference.
+- During a request the command hint shows the operation and elapsed time. A
+  second request stays in the command bar while the current operation finishes.
 - Fixes show a diff before the save dialog. Escape or Cancel dismisses the dialog
   without writing a file; blocked fixes require typing `force` to enable Save.
-- Below 120 columns the telemetry panel is hidden; below 90 columns the sidebar is
+- Below 120 columns the inspector is hidden; below 90 columns the sidebar is
   also hidden. All commands remain available in the command bar.
 - History, evaluation, and other classic CLI operations remain available through
   `trx --classic`; the full-screen sidebar lists its implemented actions.

@@ -253,19 +253,20 @@ RD_REVIEW_LOGS=false
 3. Run:
 
 ```bash
-trx              # full-screen app (Mission Ops theme; F2 switches theme)
+trx              # full-screen workspace (F2 switches theme)
 trx --classic    # classic scrolling CLI (also used automatically when output is piped)
 ```
 
-The full-screen app has a live header (LLM, GPU/CPU, code graph, mode), a navigation sidebar, the
-conversation and review cards with diffs, and a telemetry panel (confidence, LLM latency, agent
-pipeline, guardrails). `fix <file>` opens a confirmation dialog; a fix blocked by guardrails needs
+The full-screen app has a compact workspace header, a keyboard-driven sidebar, and a wide
+conversation area with code reviews and diffs. Press F3 to open the diagnostics inspector
+(confidence, response time, review pipeline, safety checks). `fix <file>` opens a confirmation dialog; a fix blocked by guardrails needs
 `force` typed before it can be saved.
 
 Use Tab and arrow keys to navigate the sidebar, Enter to select, Ctrl+L to focus
 the command bar, and Escape to cancel a fix confirmation. The app hides side panels
 in narrower terminals to keep the conversation readable. History and benchmarks
-are available through the classic CLI.
+are available through the classic CLI. The default theme uses neutral surfaces and one muted
+accent; the terminal controls the font (Cascadia Code and JetBrains Mono both work well).
 
 ---
 
