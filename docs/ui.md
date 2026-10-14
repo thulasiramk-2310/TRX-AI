@@ -13,7 +13,12 @@ scrolling CLI described below; piped output also uses the classic CLI.
   Reviews and patches use quiet separators; conversation text uses the full available width.
 - F3 or `inspect` toggles the diagnostics inspector. It starts hidden so the
   transcript has more room. Resizing preserves your preference.
-- During a request the command hint shows the operation and elapsed time. A
+- During a request a subtle animated loader shows the operation and elapsed time.
+  The activity strip shows the current stage and recent stages even with diagnostics
+  closed. F3 shows the stage trace. Reviews run Analyzer, Generator, and Critic in
+  sequence; Fixer appears only when a revision is attempted. Chat uses its own
+  generation path, and cache hits and rule fallback are labelled explicitly.
+  Stage notifications contain no prompts, code, or hidden model reasoning. A
   second request stays in the command bar while the current operation finishes.
 - Fixes show a diff before the save dialog. Escape or Cancel dismisses the dialog
   without writing a file; blocked fixes require typing `force` to enable Save.

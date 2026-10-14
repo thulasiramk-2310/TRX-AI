@@ -259,7 +259,10 @@ trx --classic    # classic scrolling CLI (also used automatically when output is
 
 The full-screen app has a compact workspace header, a keyboard-driven sidebar, and a wide
 conversation area with code reviews and diffs. Press F3 to open the diagnostics inspector
-(confidence, response time, review pipeline, safety checks). `fix <file>` opens a confirmation dialog; a fix blocked by guardrails needs
+for confidence, response time, safety checks, and a live stage trace. The thinking loader displays elapsed time and
+the current generation stage even with the inspector closed. Reviews run Analyzer → Generator
+→ Critic sequentially; Fixer appears when a revision is attempted. Chat, cache hits, fallback,
+and safety checks report their own stages. `fix <file>` opens a confirmation dialog; a fix blocked by guardrails needs
 `force` typed before it can be saved.
 
 Use Tab and arrow keys to navigate the sidebar, Enter to select, Ctrl+L to focus
