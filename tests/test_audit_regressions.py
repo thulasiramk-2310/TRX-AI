@@ -130,7 +130,6 @@ class AuditRegressionTests(unittest.TestCase):
         content += "\n[LLM FIXED CODE]\n" + "\n".join(f"value_{i} = {i}" for i in range(120))
         with tempfile.TemporaryDirectory() as tmp, \
                 patch.object(history, "_prepare_report_path", return_value=Path(tmp) / "report.pdf"), \
-                patch.object(history, "_ensure_logo_image", return_value=None), \
                 patch("reportlab.pdfgen.canvas.Canvas", return_value=doc):
             history.export_pdf_report("report.pdf", "token " + SECRET, "review", content)
         self.assertGreater(doc.showPage.call_count, 3)
@@ -143,7 +142,6 @@ class AuditRegressionTests(unittest.TestCase):
         doc = MagicMock()
         with tempfile.TemporaryDirectory() as tmp, \
                 patch.object(history, "_prepare_report_path", return_value=Path(tmp) / "report.pdf"), \
-                patch.object(history, "_ensure_logo_image", return_value=None), \
                 patch("reportlab.pdfgen.canvas.Canvas", return_value=doc):
             history.export_comparison_pdf_report("report.pdf", first_input="before", second_input=SECRET,
                 mode="review", first_structured_output="[CONFIDENCE SCORE]\n80%",

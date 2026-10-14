@@ -27,7 +27,7 @@ dependencies = [
 semantic = ["sentence-transformers>=2.7", "faiss-cpu>=1.8"]
 # Optional Supabase sync for long-term memory.
 cloud = ["supabase>=2.0"]
-dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.6"]
+dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.6", "pypdf>=6.20.1"]
 
 [project.scripts]
 trx = "main:main"
@@ -57,6 +57,7 @@ py-modules = [
     "mcp_graph",
     "observability",
     "personality",
+    "pdf_reports",
     "progress",
     "router_memory",
     "rule_engine",
