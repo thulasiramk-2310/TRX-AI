@@ -13,7 +13,7 @@ def main() -> None:
     wheel = wheels[0]
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
-        assert {"tui/app.tcss", "benchmarks/cases.jsonl", "progress.py"} <= names
+        assert {"tui/app.tcss", "benchmarks/cases.jsonl", "progress.py", "pdf_reports.py", "offline_review.py"} <= names
         forbidden = {"agents.md", ".agents", ".codex", ".claude", "causmend"}
         assert not any(forbidden & set(name.lower().split("/")) for name in names)
     with tempfile.TemporaryDirectory() as tmp:
@@ -31,9 +31,12 @@ os.environ['RD_EMBEDDINGS'] = 'false'
 import main
 from evaluation import load_dataset
 from tui.app import TRXApp, ReviewCard
+from history import SessionHistory
 assert Path(main.__file__).resolve().is_relative_to(Path(sys.argv[1]))
 assert len(load_dataset()) >= 50
 assert main.main(['analyze', 'hello']) == 0
+pdf = SessionHistory().export_pdf_report('release.pdf', 'review sample.py', 'review', '[DEBUG ANALYSIS]\n- Example finding.')
+assert pdf.read_bytes().startswith(b'%PDF-')
 async def check_ui():
     app = TRXApp(demo=True)
     async with app.run_test(size=(80, 24)) as pilot:
