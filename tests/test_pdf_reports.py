@@ -26,6 +26,18 @@ class PdfReportTests(unittest.TestCase):
         self.assertNotIn("N/A", text)
         self.assertNotIn("Performance and outlook", text)
 
+    def test_plex_fonts_are_embedded_in_the_export(self):
+        content = "[DEBUG ANALYSIS]\n- Validate input.\n[LLM FIXED CODE]\n```python\nvalue = 1\n```"
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf = self.export(content, Path(tmp) / "report.pdf")
+            fonts = [font.get_object() for font in pdf.pages[0]["/Resources"]["/Font"].values()]
+            plex = [font for font in fonts if "IBMPlex" in str(font.get("/BaseFont", ""))]
+            self.assertGreaterEqual(len(plex), 3)
+            self.assertTrue(any("Mono" in str(font["/BaseFont"]) for font in plex))
+            for font in plex:
+                descriptor = font["/FontDescriptor"].get_object()
+                self.assertGreater(len(descriptor["/FontFile2"].get_object().get_data()), 0)
+
     def test_long_code_is_paginated_without_truncation(self):
         content = "[LLM FIXED CODE]\n```python\n" + "\n".join(f"value_{i} = {i}" for i in range(300)) + "\n```"
         with tempfile.TemporaryDirectory() as tmp:

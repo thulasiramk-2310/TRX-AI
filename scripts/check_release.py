@@ -14,6 +14,8 @@ def main() -> None:
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
         assert {"tui/app.tcss", "benchmarks/cases.jsonl", "progress.py", "pdf_reports.py", "offline_review.py"} <= names
+        assert {"report_assets/fonts/IBMPlexSans-Regular.ttf", "report_assets/fonts/IBMPlexSans-SemiBold.ttf",
+                "report_assets/fonts/IBMPlexMono-Regular.ttf", "report_assets/fonts/LICENSE.txt"} <= names
         forbidden = {"agents.md", ".agents", ".codex", ".claude", "causmend"}
         assert not any(forbidden & set(name.lower().split("/")) for name in names)
     with tempfile.TemporaryDirectory() as tmp:

@@ -1,9 +1,30 @@
 """Compact, paginated PDF reports for developers."""
 from datetime import datetime
+from importlib.resources import as_file, files
 import re
+import threading
 from typing import Any
 
 from guardrails import strip_terminal_controls
+from report_assets import fonts as font_assets
+
+_FONT_LOCK = threading.Lock()
+BODY_FONT = "TRX-PlexSans"
+HEADING_FONT = "TRX-PlexSans-SemiBold"
+CODE_FONT = "TRX-PlexMono"
+
+
+def _register_fonts() -> None:
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    with _FONT_LOCK:
+        for name, filename in ((BODY_FONT, "IBMPlexSans-Regular.ttf"),
+                               (HEADING_FONT, "IBMPlexSans-SemiBold.ttf"),
+                               (CODE_FONT, "IBMPlexMono-Regular.ttf")):
+            if name not in pdfmetrics.getRegisteredFontNames():
+                with as_file(files(font_assets).joinpath(filename)) as path:
+                    pdfmetrics.registerFont(TTFont(name, str(path)))
 
 
 def parse_sections(text: str) -> dict[str, list[str]]:
@@ -51,9 +72,10 @@ class Report:
     def __init__(self, canvas: Any, size: tuple[float, float], title: str, metadata: str) -> None:
         from reportlab.lib.colors import HexColor
 
+        _register_fonts()
         self.doc = canvas
         self.width, self.height = size
-        self.margin = 50.0
+        self.margin = 54.0
         self.content_width = self.width - self.margin * 2
         self.title = title
         self.metadata = metadata
@@ -71,17 +93,17 @@ class Report:
     def _start_page(self, *, first: bool = False) -> None:
         d = self.doc
         d.setFillColor(self.accent)
-        d.setFont("Courier-Bold", 9)
+        d.setFont(CODE_FONT, 9)
         d.drawString(self.margin, self.height - 42, "TRX / REPORT")
         d.setFillColor(self.muted)
-        d.setFont("Helvetica", 8)
+        d.setFont(BODY_FONT, 8.5)
         d.drawRightString(self.width - self.margin, self.height - 42, datetime.now().strftime("%d %b %Y"))
         if first:
             d.setFillColor(self.ink)
-            d.setFont("Helvetica-Bold", 24)
+            d.setFont(HEADING_FONT, 26)
             d.drawString(self.margin, self.height - 83, self.title)
             d.setFillColor(self.muted)
-            d.setFont("Helvetica", 9)
+            d.setFont(BODY_FONT, 9.5)
             d.drawString(self.margin, self.height - 104, self.metadata)
             self.y = self.height - 119
         else:
@@ -97,7 +119,7 @@ class Report:
         d.setLineWidth(0.5)
         d.line(self.margin, 44, self.width - self.margin, 44)
         d.setFillColor(self.muted)
-        d.setFont("Helvetica", 8)
+        d.setFont(BODY_FONT, 8.5)
         d.drawString(self.margin, 29, "TRX-AI 0.2")
         d.drawRightString(self.width - self.margin, 29, str(self.page))
 
@@ -110,7 +132,7 @@ class Report:
         self._start_page()
         if self.section:
             self.doc.setFillColor(self.muted)
-            self.doc.setFont("Helvetica-Bold", 10)
+            self.doc.setFont(HEADING_FONT, 11)
             self.doc.drawString(self.margin, self.y, self.section + " / continued")
             self.y -= 24
 
@@ -145,21 +167,21 @@ class Report:
         self.section = title
         self.y -= 10
         self.doc.setFillColor(self.ink)
-        self.doc.setFont("Helvetica-Bold", 11)
+        self.doc.setFont(HEADING_FONT, 12)
         self.doc.drawString(self.margin, self.y, title)
         self.y -= 22
 
     def paragraph(self, text: str, *, bullet: bool = False, muted: bool = False) -> None:
         x = self.margin + (12 if bullet else 0)
-        rows = self.wrap(_plain(text), self.content_width - (12 if bullet else 0), "Helvetica", 10)
+        rows = self.wrap(_plain(text), self.content_width - (12 if bullet else 0), BODY_FONT, 11)
         for index, row in enumerate(rows):
-            self.ensure(15)
+            self.ensure(16)
             self.doc.setFillColor(self.muted if muted else self.ink)
-            self.doc.setFont("Helvetica", 10)
+            self.doc.setFont(BODY_FONT, 11)
             if bullet and index == 0:
                 self.doc.drawString(self.margin, self.y, "-")
             self.doc.drawString(x, self.y, row)
-            self.y -= 15
+            self.y -= 16
         self.y -= 5
 
     def code(self, lines: list[str]) -> None:
@@ -170,37 +192,41 @@ class Report:
                 continue
             number += 1
             # Keep code indentation and all lines; wrapping is purely visual.
-            rows = self.wrap(strip_terminal_controls(raw), self.content_width - 48, "Courier", 8.5, code=True)
+            rows = self.wrap(strip_terminal_controls(raw), self.content_width - 48, CODE_FONT, 9.2, code=True)
             for index, row in enumerate(rows):
                 self.ensure(14)
                 d = self.doc
                 d.setFillColor(self.surface)
                 d.rect(self.margin, self.y - 4, self.content_width, 13, stroke=0, fill=1)
                 d.setFillColor(self.muted)
-                d.setFont("Courier", 7.5)
+                d.setFont(CODE_FONT, 7.5)
                 if index == 0:
                     d.drawRightString(self.margin + 28, self.y, str(number))
                 d.setFillColor(self.ink)
-                d.setFont("Courier", 8.5)
+                d.setFont(CODE_FONT, 9.2)
                 d.drawString(self.margin + 40, self.y, row)
                 self.y -= 13
         self.y -= 16
 
     def metrics(self, rows: list[tuple[str, str, str, str]], first_label: str, second_label: str) -> None:
         self.heading("At a glance")
-        positions = [self.margin, self.margin + self.content_width * 0.40,
-                     self.margin + self.content_width * 0.61, self.margin + self.content_width * 0.82]
+        positions = [self.margin, self.margin + self.content_width * 0.58,
+                     self.margin + self.content_width * 0.79, self.width - self.margin]
         for index, row in enumerate([("Metric", first_label, second_label, "Change"), *rows]):
+            fonts = [HEADING_FONT] * 4 if index == 0 else [BODY_FONT, CODE_FONT, CODE_FONT, CODE_FONT]
             wrapped = [self.wrap(_plain(value), self.content_width * (0.37 if i == 0 else 0.18),
-                                 "Helvetica-Bold" if index == 0 else "Helvetica", 9) for i, value in enumerate(row)]
+                                 fonts[i], 10) for i, value in enumerate(row)]
             height = max(map(len, wrapped)) * 13 + 14
             self.ensure(height)
             d = self.doc
             d.setFillColor(self.muted if index == 0 else self.ink)
-            d.setFont("Helvetica-Bold" if index == 0 else "Helvetica", 9)
-            for x, values in zip(positions, wrapped, strict=True):
+            for column, (x, values) in enumerate(zip(positions, wrapped, strict=True)):
+                d.setFont(fonts[column], 10)
                 for number, value in enumerate(values):
-                    d.drawString(x, self.y - number * 13, value)
+                    if column == 0:
+                        d.drawString(x, self.y - number * 13, value)
+                    else:
+                        d.drawRightString(x, self.y - number * 13, value)
             self.y -= height
             d.setStrokeColor(self.line)
             d.setLineWidth(0.5)

@@ -6,7 +6,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[('personalities.json', '.'), ('assets', 'assets'), ('tui/app.tcss', 'tui'),
-           ('benchmarks/cases.jsonl', 'benchmarks')],
+           ('benchmarks/cases.jsonl', 'benchmarks'), ('report_assets/fonts', 'report_assets/fonts')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

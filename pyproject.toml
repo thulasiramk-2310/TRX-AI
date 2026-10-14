@@ -35,6 +35,7 @@ trx = "main:main"
 [tool.setuptools.package-data]
 tui = ["*.tcss"]
 benchmarks = ["*.jsonl"]
+"report_assets.fonts" = ["*.ttf", "*.txt", "*.json"]
 
 [tool.setuptools]
 # Runtime files use the working directory; the benchmark dataset ships in the wheel.
@@ -70,7 +71,7 @@ py-modules = [
     "vector_memory",
     "watcher",
 ]
-packages = ["tui", "benchmarks"]
+packages = ["tui", "benchmarks", "report_assets", "report_assets.fonts"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

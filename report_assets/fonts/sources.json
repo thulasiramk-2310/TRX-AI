@@ -1,0 +1,18 @@
+{
+  "source": "https://github.com/IBM/plex",
+  "commit": "39276912b05f700ee1dd491950c35d8697214208",
+  "files": {
+    "IBMPlexSans-Regular.ttf": {
+      "upstream_path": "packages/plex-sans/fonts/complete/ttf/IBMPlexSans-Regular.ttf",
+      "sha256": "975dcda37d80f038dcd143c22e33ca2d97a0cc5a929aace1c749153b0fe1afa5"
+    },
+    "IBMPlexSans-SemiBold.ttf": {
+      "upstream_path": "packages/plex-sans/fonts/complete/ttf/IBMPlexSans-SemiBold.ttf",
+      "sha256": "a20caf8286023a6a7a85e40b1d2a4ae9fc3e3b1f9eda8f4c542dd4986af67bb1"
+    },
+    "IBMPlexMono-Regular.ttf": {
+      "upstream_path": "packages/plex-mono/fonts/complete/ttf/IBMPlexMono-Regular.ttf",
+      "sha256": "7c6fbddca4b700be918f5f6183d9bd4464fa427fe435f0b480d77fe2bb8c5a43"
+    }
+  }
+}
