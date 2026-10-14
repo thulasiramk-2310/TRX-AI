@@ -83,14 +83,7 @@ class SessionHistory:
         structured_output: str,
     ) -> Path:
         """Exports a human-readable analysis report under the reports folder."""
-        reports_dir = Path("reports")
-        reports_dir.mkdir(parents=True, exist_ok=True)
-
-        safe_name = file_name.strip() or "report.txt"
-        if not safe_name.lower().endswith(".txt"):
-            safe_name += ".txt"
-
-        destination = reports_dir / safe_name
+        destination = self._report_path(file_name, default_name="report.txt", suffix=".txt")
         content = (
             "TRX-AI (Reality Debugger) Report\n"
             "================================\n"
@@ -114,6 +107,8 @@ class SessionHistory:
             "PDF export requires reportlab. Install it with: pip install reportlab"
         )
         destination = self._prepare_report_path(filename, default_name="report.pdf")
+        user_input = redact_secrets(user_input)[0]
+        structured_output = redact_secrets(structured_output)[0]
 
         logo_path = self._ensure_logo_image()
         diagram_path = Path("assets") / "diagram.png"
@@ -161,7 +156,21 @@ class SessionHistory:
             ("CONFIDENCE SCORE", confidence),
         ]
 
-        cards = [(title, lines) for title, lines in cards if lines]
+        paginated_cards = []
+        for title, lines in cards:
+            if not lines:
+                continue
+            if title == "LLM FIXED CODE":
+                rows = [part for line in lines for part in textwrap.wrap(
+                    line, width=80, replace_whitespace=False, drop_whitespace=False
+                ) or [""]]
+            else:
+                rows = [part for line in lines for part in self._wrap_pdf_line(line, content_width - 40)]
+            for offset in range(0, len(rows), 35):
+                # Keep the code title intact so continued code retains the monospace renderer.
+                label = title if offset == 0 or title == "LLM FIXED CODE" else f"{title} (continued)"
+                paginated_cards.append((label, rows[offset:offset + 35]))
+        cards = paginated_cards
 
         for title, lines in cards:
             required = self._estimate_card_height(lines)
@@ -240,6 +249,11 @@ class SessionHistory:
             "Comparison PDF export requires reportlab. Install it with: pip install reportlab"
         )
         destination = self._prepare_report_path(filename, default_name="comparison_report.pdf")
+        first_input, second_input, first_structured_output, second_structured_output, first_label, second_label = (
+            redact_secrets(value)[0] for value in (
+                first_input, second_input, first_structured_output, second_structured_output, first_label, second_label
+            )
+        )
 
         logo_path = self._ensure_logo_image()
 
@@ -353,11 +367,7 @@ class SessionHistory:
             theme=theme,
         )
 
-        recommendation = [
-            "Run 2 demonstrates improved confidence compared to Run 1. "
-            "It is recommended to continue this strategy while enhancing input "
-            "specificity to achieve more precise diagnostics."
-        ]
+        recommendation = self._comparison_recommendation(metrics_first, metrics_second, first_label, second_label)
         y = self._draw_recommendation_card(
             doc,
             y,
@@ -384,12 +394,19 @@ class SessionHistory:
 
     @staticmethod
     def _prepare_report_path(filename: str, *, default_name: str) -> Path:
-        reports_dir = Path("reports")
-        reports_dir.mkdir(parents=True, exist_ok=True)
+        return SessionHistory._report_path(filename, default_name=default_name, suffix=".pdf")
+
+    @staticmethod
+    def _report_path(filename: str, *, default_name: str, suffix: str) -> Path:
+        reports_dir = Path("reports").resolve()
         safe_name = filename.strip() or default_name
-        if not safe_name.lower().endswith(".pdf"):
-            safe_name += ".pdf"
-        return reports_dir / safe_name
+        if not safe_name.lower().endswith(suffix):
+            safe_name += suffix
+        destination = (reports_dir / safe_name).resolve()
+        if not destination.is_relative_to(reports_dir):
+            raise ValueError("Report path must stay inside the reports folder.")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        return destination
 
     @staticmethod
     def _build_pdf_theme(colors: Any) -> dict[str, Any]:
@@ -436,6 +453,25 @@ class SessionHistory:
     def _wrap_lines(text: str, max_chars: int) -> list[str]:
         wrapped = textwrap.wrap(text, width=max_chars, break_long_words=False, break_on_hyphens=False)
         return wrapped if wrapped else [""]
+
+    @staticmethod
+    def _wrap_pdf_line(text: str, max_width: float) -> list[str]:
+        from reportlab.pdfbase.pdfmetrics import stringWidth
+
+        rows = []
+        for line in str(text).splitlines() or [""]:
+            remaining = line
+            while remaining and stringWidth(remaining, "Helvetica", 10) > max_width:
+                end = 1
+                while end < len(remaining) and stringWidth(remaining[:end + 1], "Helvetica", 10) <= max_width:
+                    end += 1
+                split = remaining.rfind(" ", 0, end + 1)
+                if split > 0:
+                    end = split
+                rows.append(remaining[:end])
+                remaining = remaining[end:].lstrip()
+            rows.append(remaining)
+        return rows
 
     @staticmethod
     def _trim_code_block_lines(lines: list[str], max_lines: int = 120) -> list[str]:
@@ -941,10 +977,9 @@ class SessionHistory:
                 theme,
             )
 
-        max_chars = 98
         wrapped: list[str] = []
         for entry in lines:
-            wrapped.extend(self._wrap_lines(entry, max_chars=max_chars))
+            wrapped.extend(self._wrap_pdf_line(entry, content_width - 40))
 
         line_height = 13
         card_h = 26 + (len(wrapped) * line_height) + 10
@@ -985,7 +1020,7 @@ class SessionHistory:
     ) -> float:
         from reportlab.lib import colors
 
-        max_chars = 100
+        max_chars = 80
         wrapped: list[str] = []
         for raw in lines:
             line = raw.expandtabs(4).rstrip("\n")
@@ -1094,7 +1129,7 @@ class SessionHistory:
         doc.setFillColor(colors.HexColor("#4A5D73"))
         doc.setFont("Helvetica", 9)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        doc.drawString(margin_x, y, "Generated by TRX-AI v1.0 | Evaluation Module")
+        doc.drawString(margin_x, y, "Generated by TRX-AI v0.2 | Evaluation Module")
         doc.drawRightString(page_width - margin_x, y, f"{timestamp} | Page {page_number}")
 
     def _draw_section_heading(

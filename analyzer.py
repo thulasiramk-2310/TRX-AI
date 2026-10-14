@@ -579,7 +579,9 @@ class RealityAnalyzer:
             personality=self.personality,
         )
         related_context = "\n".join(f"- {item}" for item in related[:3]).strip()
-        cloud_related = self._cloud_memory.fetch_memory(self.current_user, limit=2) if self.current_user != "guest" else []
+        cloud_related = self._cloud_memory.fetch_memory(
+            self.current_user, limit=2, personality=self.personality
+        ) if self.current_user != "guest" else []
         cloud_context = "\n".join(f"- {item}" for item in cloud_related if str(item).strip()).strip()
 
         # Greeting fast path before any LLM call.

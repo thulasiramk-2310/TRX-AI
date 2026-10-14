@@ -58,23 +58,29 @@ def call_local_llm(
             except ValueError:
                 continue
 
-            text = str(data.get("response", "")).strip()
+            if not isinstance(data, dict):
+                continue
+
+            def response_text(value: Any) -> str:
+                return value.strip() if isinstance(value, str) else ""
+
+            text = response_text(data.get("response"))
             if not text:
-                text = str(data.get("generated_text", "")).strip()
+                text = response_text(data.get("generated_text"))
             if not text:
-                text = str(data.get("output_text", "")).strip()
+                text = response_text(data.get("output_text"))
             if not text:
                 message = data.get("message")
                 if isinstance(message, dict):
-                    text = str(message.get("content", "")).strip()
+                    text = response_text(message.get("content"))
             if not text:
                 choices = data.get("choices")
                 if isinstance(choices, list) and choices:
                     first = choices[0]
                     if isinstance(first, dict):
-                        text = str(first.get("text", "")).strip()
+                        text = response_text(first.get("text"))
                         if not text and isinstance(first.get("message"), dict):
-                            text = str(first["message"].get("content", "")).strip()
+                            text = response_text(first["message"].get("content"))
             if text:
                 return {
                     "ok": True,

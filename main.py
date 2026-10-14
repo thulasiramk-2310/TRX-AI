@@ -12,6 +12,7 @@ import textwrap
 import time
 from datetime import datetime
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, Callable
 
 from rich.console import Console, Group
@@ -24,7 +25,7 @@ from analyzer import RealityAnalyzer
 from cli_input import StatusState, build_prompt_fn, normalize_command
 from config import AppConfig
 from formatter import THEME, OutputFormatter, gradient_text
-from guardrails import Finding, check_fix, find_prompt_injection
+from guardrails import Finding, check_fix, find_prompt_injection, strip_terminal_controls
 from history import SessionHistory
 from mcp_graph import detect_mcp_graph_status
 from observability import METRICS
@@ -201,6 +202,7 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
 
         command = user_input.lower()
         command_parts = user_input.split()
+        command_word = command_parts[0].lower()
 
         if command in {"exit", "quit"}:
             _run_with_prompt_loader(console, user_input, lambda: None)
@@ -341,7 +343,7 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
             continue
 
         if command == "status":
-            status = analyzer.runtime_status()
+            runtime_status = analyzer.runtime_status()
             snap = METRICS.snapshot()
             counters = snap.get("counters", {})
             states = snap.get("states", {})
@@ -355,14 +357,14 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
             console.print(f"Mode: {mode.upper()}")
             console.print(f"User: {(current_user or 'guest').upper()}")
             console.print(f"Personality: {personality.upper()}")
-            console.print(f"Graph Transport: {status.get('graph_transport', 'LOCAL')}")
-            console.print(f"MCP: {'ACTIVE' if status.get('mcp_active') else 'DEGRADED'}")
-            console.print(f"Breaker: {status.get('circuit_breaker_state', states.get('circuit_breaker_state', 'CLOSED'))}")
+            console.print(f"Graph Transport: {runtime_status.get('graph_transport', 'LOCAL')}")
+            console.print(f"MCP: {'ACTIVE' if runtime_status.get('mcp_active') else 'DEGRADED'}")
+            console.print(f"Breaker: {runtime_status.get('circuit_breaker_state', states.get('circuit_breaker_state', 'CLOSED'))}")
             console.print(f"Cache: HIT {cache_hit_rate}%")
-            console.print(f"Cache TTL: {int(status.get('cache_ttl_seconds', 0))}s")
+            console.print(f"Cache TTL: {int(runtime_status.get('cache_ttl_seconds', 0))}s")
             console.print(f"Latency: {avg_latency}ms avg")
-            console.print(f"Cache: {'ENABLED' if status.get('cache_enabled') else 'DISABLED'}")
-            console.print(f"LLM: {'CONNECTED' if status.get('llm_connected') else 'DISCONNECTED'}")
+            console.print(f"Cache: {'ENABLED' if runtime_status.get('cache_enabled') else 'DISABLED'}")
+            console.print(f"LLM: {'CONNECTED' if runtime_status.get('llm_connected') else 'DISCONNECTED'}")
             continue
 
         if command == "cache clear":
@@ -441,7 +443,7 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                     console.print(f"{idx}. {item}")
             continue
 
-        if command.startswith("save"):
+        if command_word == "save":
             try:
                 save_path = None
                 if len(command_parts) > 1:
@@ -452,7 +454,7 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                 _print_error(console, f"Unable to save session: {exc}")
             continue
 
-        if command.startswith("export"):
+        if command_word == "export":
             if len(command_parts) >= 2 and command_parts[1].lower() == "compare":
                 compare_entries = _run_with_prompt_loader(
                     console,
@@ -534,7 +536,7 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                 _print_error(console, str(exc))
             continue
 
-        if command.startswith("agents"):
+        if command_word == "agents":
             requested = [part.lower() for part in command_parts[1:]]
             if not requested:
                 _print_error(console, "Usage: agents all OR agents debug improve predict")
@@ -553,11 +555,11 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
             _print_dashboard(console, config, total_analyses, analyzer)
             continue
 
-        if command.startswith("mode"):
+        if command_word == "mode":
             _print_error(console, "Invalid mode command. Use: mode debug, mode optimize, or mode predict")
             continue
 
-        if command.startswith("review"):
+        if command_word == "review":
             if len(command_parts) < 2:
                 _print_error(console, "Usage: review <file.py | folder_path>")
                 continue
@@ -598,7 +600,7 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                 _print_error(console, f"Unable to read review target: {exc}")
             continue
 
-        if command.startswith("fix"):
+        if command_word == "fix":
             if len(command_parts) < 2:
                 _print_error(console, "Usage: fix <file.py>")
                 continue
@@ -683,7 +685,7 @@ def run_cli(input_fn: Callable[[str], str] | None = None) -> None:
                 _print_error(console, f"Unable to apply fix: {exc}")
             continue
 
-        if command.startswith("watch"):
+        if command_word == "watch":
             if len(command_parts) < 2:
                 _print_error(console, "Usage: watch <folder>")
                 continue
@@ -894,6 +896,11 @@ def _build_fix_comment_header(
     prefix, suffix = _comment_style_for_path(destination_path)
 
     def line(text: str) -> str:
+        # Explanations are model output too: never let newlines or a closing block
+        # comment turn metadata into executable statements after fix checks ran.
+        text = " ".join(strip_terminal_controls(text).split())
+        if suffix.strip():
+            text = text.replace(suffix.strip(), " ".join(suffix.strip()))
         return f"{prefix}{text}{suffix}".rstrip()
 
     items: list[str] = []
@@ -951,6 +958,8 @@ def apply_code_fix(
         raise FileNotFoundError(original_path)
 
     destination = source.with_name(f"{source.stem}_fixed{source.suffix or '.txt'}")
+    if destination.is_symlink() or (destination.exists() and destination.samefile(source)):
+        raise ValueError("Fixed output must not be a link to another file or to the original.")
     base_original = original_code if original_code is not None else source.read_text(encoding="utf-8")
     comment_header = _build_fix_comment_header(
         destination_path=destination,
@@ -958,7 +967,18 @@ def apply_code_fix(
         fixed_code=fixed_code,
         reason=reason,
     )
-    destination.write_text(comment_header + fixed_code, encoding="utf-8")
+    temporary_path = None
+    try:
+        with NamedTemporaryFile("w", encoding="utf-8", dir=destination.parent, prefix=".trx-fix-",
+                                suffix=".tmp", delete=False) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(comment_header + fixed_code)
+        # Replace the directory entry, rather than following a link swapped in
+        # after the check above. Failed writes leave the previous output intact.
+        os.replace(temporary_path, destination)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
     return destination
 
 

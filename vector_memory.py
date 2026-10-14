@@ -49,6 +49,8 @@ class VectorMemory:
         try:
             if self.path.exists():
                 payload = json.loads(self.path.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    return
                 rows = payload.get("entries", [])
                 if isinstance(rows, list):
                     self.entries = [item for item in rows if isinstance(item, dict) and str(item.get("text", "")).strip()]

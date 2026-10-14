@@ -48,11 +48,14 @@ class CloudMemorySync:
         except Exception:
             return False
 
-    def fetch_memory(self, user: str, *, limit: int = 5) -> list[str]:
+    def fetch_memory(self, user: str, *, limit: int = 5, personality: str | None = None) -> list[str]:
         if not self.is_ready():
             return []
         try:
-            res = self.client.table(self.table).select("*").eq("user", str(user or "guest")).limit(max(1, int(limit))).execute()
+            query = self.client.table(self.table).select("*").eq("user", str(user or "guest"))
+            if personality is not None:
+                query = query.eq("personality", str(personality or "friendly"))
+            res = query.limit(max(1, int(limit))).execute()
             rows = getattr(res, "data", []) or []
             out = [str(item.get("text", "")).strip() for item in rows if isinstance(item, dict) and str(item.get("text", "")).strip()]
             return out

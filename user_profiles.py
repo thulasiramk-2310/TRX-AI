@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from guardrails import redact
 
 
 class UserProfiles:
@@ -28,7 +29,7 @@ class UserProfiles:
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"users": self.users}
+        payload = redact({"users": self.users})
         self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def list_users(self) -> list[str]:

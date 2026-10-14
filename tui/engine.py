@@ -124,6 +124,8 @@ class Engine:
         if for_fix:
             if not path.is_file():
                 raise FileNotFoundError(target)
+            if path.suffix.lower() not in self._main.SUPPORTED_CODE_SUFFIXES:
+                raise ValueError("Unsupported code file format.")
             code = path.read_text(encoding="utf-8")
         else:
             code = self._main._load_review_target(target, config=self.config)

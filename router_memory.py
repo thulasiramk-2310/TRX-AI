@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from guardrails import redact
 import json
+import hashlib
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -16,15 +18,15 @@ class RouterMemory:
         self._load()
 
     def record(self, text: str, route: str) -> None:
-        key = str(text).lower().strip()
-        if not key:
+        if not str(text).strip():
             return
+        key = self._key(text)
         target = "code" if route == "code" else "general"
         self.stats[key][target] = int(self.stats[key].get(target, 0)) + 1
         self._save()
 
     def get_bias(self, text: str) -> str | None:
-        key = str(text).lower().strip()
+        key = self._key(text)
         data = self.stats.get(key)
         if not data:
             return None
@@ -40,7 +42,8 @@ class RouterMemory:
             for key, value in payload.items():
                 if not isinstance(key, str) or not isinstance(value, dict):
                     continue
-                self.stats[key] = {
+                safe_key = key if re.fullmatch(r"[0-9a-f]{64}", key) else self._key(key)
+                self.stats[safe_key] = {
                     "code": int(value.get("code", 0)),
                     "general": int(value.get("general", 0)),
                 }
@@ -54,4 +57,8 @@ class RouterMemory:
             self.path.write_text(json.dumps(redact(serializable), ensure_ascii=False), encoding="utf-8")
         except OSError:
             return
+
+    @staticmethod
+    def _key(text: str) -> str:
+        return hashlib.sha256(str(text).lower().strip().encode("utf-8")).hexdigest()
 

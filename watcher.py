@@ -55,7 +55,7 @@ class CodeChangeHandler(FileSystemEventHandler):
 
         try:
             code = file_path.read_text(encoding="utf-8")
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             print(f"[Watcher error] Unable to read file: {exc}")
             return
 
@@ -103,9 +103,11 @@ class CodeChangeHandler(FileSystemEventHandler):
             return True
         if name.startswith("."):
             return True
-        if name.endswith("_fixed.py"):
+        if path.stem.lower().endswith("_fixed"):
             return True
-        if "__pycache__" in {part.lower() for part in path.parts}:
+        if {"__pycache__", ".git", ".venv", "venv", "node_modules", "build", "dist"} & {
+            part.lower() for part in path.parts[:-1]
+        }:
             return True
         return False
 

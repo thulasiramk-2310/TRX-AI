@@ -190,10 +190,19 @@ def build_prompt_fn(
     from prompt_toolkit.shortcuts import CompleteStyle
     from prompt_toolkit.history import FileHistory, InMemoryHistory
     from prompt_toolkit.styles import Style
+    from guardrails import redact_secrets
+
+    class RedactedFileHistory(FileHistory):
+        def store_string(self, string: str) -> None:
+            super().store_string(redact_secrets(string)[0])
+
+        def load_history_strings(self):
+            for string in super().load_history_strings():
+                yield redact_secrets(string)[0]
 
     try:
         Path(history_path).parent.mkdir(parents=True, exist_ok=True)
-        history: Any = FileHistory(str(history_path))
+        history: Any = RedactedFileHistory(str(history_path))
     except OSError:
         history = InMemoryHistory()
 

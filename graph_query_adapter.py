@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import time
+import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -399,6 +400,7 @@ class CodeReviewGraphAdapter:
         self.disk_cache_enabled = disk_cache_enabled
         self.db_path = Path(db_path)
         self._cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._cache_lock = threading.RLock()
         self._load_disk_cache()
 
         transport = os.getenv("RD_GRAPH_TRANSPORT", "local").strip().lower()
@@ -438,12 +440,13 @@ class CodeReviewGraphAdapter:
         return "LOCAL"
 
     def clear_cache(self) -> None:
-        self._cache.clear()
-        if self.disk_cache_enabled and self.disk_cache_path.exists():
-            try:
-                self.disk_cache_path.unlink()
-            except OSError:
-                pass
+        with self._cache_lock:
+            self._cache.clear()
+            if self.disk_cache_enabled and self.disk_cache_path.exists():
+                try:
+                    self.disk_cache_path.unlink()
+                except OSError:
+                    pass
 
     def query_dependencies(self, file: str) -> GraphQueryResult:
         key = self._cache_key("deps", {"file": file})
@@ -582,6 +585,10 @@ class CodeReviewGraphAdapter:
         return f"v{self.cache_version}:{fingerprint}:{name}:{json.dumps(payload, sort_keys=True, ensure_ascii=False)}"
 
     def _cache_get(self, key: str) -> dict[str, Any] | None:
+        with self._cache_lock:
+            return self._cache_get_locked(key)
+
+    def _cache_get_locked(self, key: str) -> dict[str, Any] | None:
         if key not in self._cache:
             return None
         value = self._cache.pop(key)
@@ -592,6 +599,10 @@ class CodeReviewGraphAdapter:
         return value
 
     def _cache_set(self, key: str, result: GraphQueryResult) -> None:
+        with self._cache_lock:
+            self._cache_set_locked(key, result)
+
+    def _cache_set_locked(self, key: str, result: GraphQueryResult) -> None:
         if key in self._cache:
             self._cache.pop(key)
         payload = {
@@ -626,12 +637,16 @@ class CodeReviewGraphAdapter:
             if not self.disk_cache_path.exists():
                 return
             payload = json.loads(self.disk_cache_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return
             if int(payload.get("version", 0)) != self.cache_version:
                 return
             items = payload.get("items", [])
             if not isinstance(items, list):
                 return
             for item in items[-self.memory_cache_size :]:
+                if not isinstance(item, dict):
+                    continue
                 key = str(item.get("key", ""))
                 value = item.get("value")
                 if key and isinstance(value, dict):

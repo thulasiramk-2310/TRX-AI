@@ -24,6 +24,7 @@ from typing import Any
 from analyzer import RealityAnalyzer, call_local_llm
 from config import AppConfig
 from semantic_scoring import SemanticMatcher
+from guardrails import redact
 
 DATASET_PATH = Path(__file__).resolve().parent / "benchmarks" / "cases.jsonl"
 DEFAULT_REPORT_DIR = Path("reports") / "eval"
@@ -334,7 +335,7 @@ def evaluate_trx_ai(
         text_target.parent.mkdir(parents=True, exist_ok=True)
         json_target.parent.mkdir(parents=True, exist_ok=True)
         text_target.write_text(render_text_report(results) + "\n", encoding="utf-8")
-        json_target.write_text(json.dumps(results, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        json_target.write_text(json.dumps(redact(results), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         results["report_paths"] = {"text": str(text_target), "json": str(json_target)}
         if verbose:
             print(f"- Report saved: {text_target} / {json_target}")

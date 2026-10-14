@@ -55,8 +55,12 @@ def _persist_personalities(data: dict[str, dict[str, str]]) -> None:
 
 def load_personalities() -> dict[str, dict[str, str]]:
     if not PERSONALITIES_PATH.exists():
-        _persist_personalities(DEFAULT_PERSONALITIES)
-        return dict(DEFAULT_PERSONALITIES)
+        data = {key: dict(value) for key, value in DEFAULT_PERSONALITIES.items()}
+        try:
+            _persist_personalities(data)
+        except OSError:
+            pass
+        return data
     try:
         payload = json.loads(PERSONALITIES_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):

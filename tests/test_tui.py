@@ -142,6 +142,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(command.value, "review ")
             nav.focus()
             nav.highlighted = 2
+            await pilot.pause()
             await pilot.press("enter")
             self.assertEqual(command.value, "fix ")
             nav.focus()
@@ -149,6 +150,7 @@ class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(app.focused, command)
             nav.focus()
             nav.highlighted = 3
+            await pilot.pause()
             await pilot.press("enter")
             self.assertTrue(any("review <file" in m._markdown for m in app.query(Markdown)))
             self.assertNotIn("SRE", " ".join(m._markdown for m in app.query(Markdown)))

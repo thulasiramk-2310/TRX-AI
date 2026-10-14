@@ -482,8 +482,8 @@ class TRXApp(App):
             self.query_one("#guard-text", Static).update("\n".join(rows))
         elif result.get("response_mode") == "analysis":
             self.query_one("#guard-text", Static).update(
-                "[green]✓[/] secrets masked in storage\n[green]✓[/] code fenced as untrusted\n"
-                "[green]✓[/] no prompt-injection text\n[green]✓[/] output sanitised")
+                "No findings from available checks." if "guardrails" in result else
+                "No fix-safety checks performed for this request.")
 
     def _update_session(self) -> None:
         stats = getattr(self.engine, "stats", None)

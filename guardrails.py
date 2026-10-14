@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import ast
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any
 
 REDACTED = "[REDACTED]"
@@ -67,11 +67,13 @@ def redact(value: Any) -> Any:
     if isinstance(value, str):
         return redact_secrets(value)[0]
     if isinstance(value, dict):
-        return {k: redact(v) for k, v in value.items()}
+        return {redact(k): redact(v) for k, v in value.items()}
     if isinstance(value, list):
         return [redact(v) for v in value]
     if isinstance(value, tuple):
         return tuple(redact(v) for v in value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return redact(asdict(value))
     return value
 
 
