@@ -501,7 +501,8 @@ class TRXApp(App):
     def _mount(self, widget: Any) -> None:
         stream = self.query_one("#stream", VerticalScroll)
         stream.mount(widget)
-        stream.scroll_end(animate=False)
+        # Newly mounted content has no final height until the next layout pass.
+        self.call_after_refresh(stream.scroll_end, animate=False)
 
     def _add_user(self, text: str) -> None:
         for welcome in self.query("#welcome"):

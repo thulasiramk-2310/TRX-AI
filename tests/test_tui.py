@@ -68,6 +68,18 @@ async def submit(pilot, app: TRXApp, text: str) -> None:
 
 
 class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
+    async def test_new_notes_scroll_into_view_after_long_review(self) -> None:
+        app = TRXApp(engine=FakeEngine())
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.show_result(dict(REVIEW, debug_analysis=["Finding " + str(i) for i in range(30)]))
+            await pilot.pause()
+            app._note("Fix saved as examples/find_max_fixed.py", "success")
+            await pilot.pause()
+            stream = app.query_one("#stream")
+            note = list(app.query(".note"))[-1]
+            self.assertTrue(stream.content_region.overlaps(note.region))
+            self.assertAlmostEqual(stream.scroll_y, stream.max_scroll_y, delta=1)
+
     async def test_safety_inspector_resets_between_review_and_chat(self) -> None:
         engine = FakeEngine(findings=[Finding("block", "Fix introduces eval()")])
         app = TRXApp(engine=engine)
