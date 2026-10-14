@@ -222,6 +222,8 @@ class TRXApp(App):
         self._busy_started_at = 0.0
         self._busy_label = ""
         self._command_hint: Static | None = None
+        self._activity: Static | None = None
+        self._stages: list[str] = []
 
     # -- layout ------------------------------------------------------------------------
 
@@ -249,6 +251,7 @@ class TRXApp(App):
                 guard = Vertical(Static("[dim]no checks yet[/]", id="guard-text"), classes="tile")
                 guard.border_title = "Safety checks"
                 yield guard
+        yield Static("", id="activity", markup=False)
         yield Static("Enter submit   ·   Ctrl+L focus   ·   F3 diagnostics", id="command-hint")
         yield Input(placeholder="Ask a question or enter a command…", id="command")
         yield Footer()
@@ -261,7 +264,9 @@ class TRXApp(App):
         self.query_one("#command", Input).border_title = " Command "
         self.screen.set_class(self.inspector_visible, "inspecting")
         self._command_hint = self.query_one("#command-hint", Static)
-        self.set_interval(1, self._refresh_command_hint)
+        self._activity = self.query_one("#activity", Static)
+        self._activity.display = False
+        self.set_interval(0.15, self._animate_busy)
         self._update_session()
         if self.demo:
             from tui.demo import DEMO_STATUS, demo_results
@@ -330,7 +335,7 @@ class TRXApp(App):
     @work(thread=True, exclusive=True, group="ops")
     def run_chat(self, text: str) -> None:
         try:
-            result = self.engine.chat(text)
+            result = self.engine.chat(text, progress=self._worker_progress)
         except Exception as exc:  # noqa: BLE001
             self.call_from_thread(self._finish_error, str(exc))
             return
@@ -339,7 +344,7 @@ class TRXApp(App):
     @work(thread=True, exclusive=True, group="ops")
     def run_review(self, target: str, for_fix: bool) -> None:
         try:
-            result = self.engine.review(target, for_fix=for_fix)
+            result = self.engine.review(target, for_fix=for_fix, progress=self._worker_progress)
         except FileNotFoundError:
             self.call_from_thread(self._finish_error, f"File or folder not found: {target}")
             return
@@ -401,6 +406,7 @@ class TRXApp(App):
 
     def show_result(self, result: dict[str, Any], for_fix: bool = False) -> None:
         self.busy = False
+        self._hide_activity()
         self._refresh_command_hint()
         if result.get("response_mode") == "analysis":
             self._mount(ReviewCard(result))
@@ -509,12 +515,16 @@ class TRXApp(App):
         self.busy = True
         self._busy_started_at = time.monotonic()
         self._busy_label = label
+        self._stages = []
+        if self._activity is not None:
+            self._activity.display = True
         self._refresh_command_hint()
         self.query_one("#pipeline-text", Static).update(Text.assemble(("◐ ", "yellow"), "working: ", (label, "bold")))
         self.query_one("#pipeline-bar", ProgressBar).update(total=None)
 
     def _finish_error(self, message: str) -> None:
         self.busy = False
+        self._hide_activity()
         self._refresh_command_hint()
         self.query_one("#pipeline-text", Static).update("[red]✗[/] failed")
         self.query_one("#pipeline-bar", ProgressBar).update(total=1, progress=0)
@@ -525,10 +535,41 @@ class TRXApp(App):
             return
         if self.busy:
             elapsed = max(0, int(time.monotonic() - self._busy_started_at))
-            hint = Text.assemble(("Working", "bold"), f"  ·  {self._busy_label}  ·  {elapsed}s")
+            frame = ("[.  ]", "[ . ]", "[  .]", "[ . ]")[int(time.monotonic() * 6) % 4]
+            hint = Text.assemble((f"{frame} Working", "bold"), f"  ·  {self._busy_label}  ·  {elapsed}s")
+            if self._activity is not None and self._activity.is_mounted:
+                current = self._stages[-1] if self._stages else "Preparing request"
+                trail = " > ".join(s.partition(" · ")[0] for s in self._stages[-5:])
+                self._activity.update(Text.assemble(
+                    (current, "bold"), (f"\n{trail}" if trail else "", "dim")))
         else:
             hint = Text("Enter submit   ·   Ctrl+L focus   ·   F3 diagnostics")
         self._command_hint.update(hint)
+
+    def _animate_busy(self) -> None:
+        if self.busy:
+            self._refresh_command_hint()
+
+    def _hide_activity(self) -> None:
+        if self._activity is not None:
+            self._activity.display = False
+
+    def _worker_progress(self, label: str) -> None:
+        self.call_from_thread(self._show_progress, label)
+
+    def _show_progress(self, label: str) -> None:
+        if not self.busy:
+            return
+        label = strip_terminal_controls(label)
+        if not self._stages or self._stages[-1] != label:
+            self._stages.append(label)
+            self._stages = self._stages[-12:]
+        self._refresh_command_hint()
+        trace = Text()
+        for previous in self._stages[:-1]:
+            trace.append(f"  {previous}\n", style="dim")
+        trace.append(f"> {label}", style="bold")
+        self.query_one("#pipeline-text", Static).update(trace)
 
     def action_cycle_theme(self) -> None:
         names = [t.name for t in THEMES]

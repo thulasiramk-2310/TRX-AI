@@ -16,6 +16,7 @@ import requests
 
 from config import AppConfig
 from guardrails import check_fix
+from progress import ProgressCallback, report_progress, stage
 
 
 @dataclass
@@ -92,7 +93,12 @@ class Engine:
 
     # ------------------------------------------------------------------ operations
 
-    def chat(self, text: str) -> dict[str, Any]:
+    def chat(self, text: str, *, progress: ProgressCallback | None = None) -> dict[str, Any]:
+        with report_progress(progress):
+            stage("Routing · selecting response path")
+            return self._chat(text)
+
+    def _chat(self, text: str) -> dict[str, Any]:
         started = time.perf_counter()
         owner = getattr(self.analyzer, "current_user", "guest")
         context = [entry for entry in self.context if entry.get("owner", "guest") == owner]
@@ -106,7 +112,13 @@ class Engine:
         self._main._append_run_history(text, "chat", result)
         return result
 
-    def review(self, target: str, *, for_fix: bool = False) -> dict[str, Any]:
+    def review(self, target: str, *, for_fix: bool = False,
+               progress: ProgressCallback | None = None) -> dict[str, Any]:
+        with report_progress(progress):
+            stage("Reading · loading code")
+            return self._review(target, for_fix=for_fix)
+
+    def _review(self, target: str, *, for_fix: bool = False) -> dict[str, Any]:
         started = time.perf_counter()
         path = Path(target)
         if for_fix:
@@ -122,6 +134,7 @@ class Engine:
         result["review_target"] = target
         result.setdefault("elapsed_seconds", elapsed)
         result.setdefault("model_name", self.config.local_llm_model)
+        stage("Safety · checking suggested changes")
         guardrails = list(self._main._injection_findings(code))
         fixed = str(result.get("fixed_code", "")).strip()
         if for_fix and fixed:

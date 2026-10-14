@@ -54,6 +54,7 @@ py-modules = [
     "mcp_graph",
     "observability",
     "personality",
+    "progress",
     "router_memory",
     "rule_engine",
     "semantic_router",

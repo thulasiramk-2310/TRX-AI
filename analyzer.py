@@ -43,6 +43,7 @@ from intent_rules import (  # noqa: F401 - re-exported for existing importers
 from llm_client import call_local_llm  # noqa: F401 - re-exported for existing importers
 from guardrails import UNTRUSTED_CODE_RULE, fence_untrusted_code
 from rule_engine import RuleEngine
+from progress import stage
 
 
 
@@ -210,10 +211,12 @@ class RealityAnalyzer:
                 pass
 
         if route_mode == "general":
+            stage("Chat · preparing response")
             context = past_context or []
             cache_key = self._cache_key(cleaned, mode, context)
             cached_general = self._cache_get(cache_key)
             if cached_general:
+                stage("Cache · reusing saved response")
                 return self._finalize_runtime_fields(cached_general, started, routing_debug)
             if classify_intent(cleaned) == "theory":
                 result = self._handle_theory(cleaned)
@@ -479,6 +482,7 @@ class RealityAnalyzer:
         return any(marker in normalized for marker in definition_markers)
 
     def _classify_intent_with_llm(self, user_input: str) -> dict[str, Any] | None:
+        stage("Routing · classifying request")
         prompt = (
             "Classify intent for a CLI assistant.\n"
             "Allowed labels: greeting, chat, problem, command, theory, code, general\n"
@@ -525,6 +529,7 @@ class RealityAnalyzer:
         }
 
     def _handle_chat(self, user_input: str) -> dict[str, Any]:
+        stage("Chat · generating response")
         prompt = self._build_chat_prompt(user_input)
         local = self._call_local(prompt)
 
@@ -702,6 +707,7 @@ Answer:
         return f"{prefix} {text}"
 
     def call_llm(self, prompt: str, temperature: float | None = None) -> str:
+        stage("Chat · generating response")
         local = self._call_local(prompt, temperature=temperature)
         if local.get("ok"):
             return self._sanitize_identity(str(local.get("text", ""))).strip()
@@ -771,6 +777,7 @@ Answer:
             return ["Debug agent is disabled."], "rule"
 
         prompt = self._build_debug_agent_prompt(user_input, context)
+        stage("Debug · diagnosing the problem")
         local = self._call_local(prompt)
         if local.get("ok"):
             lines = self.parse_section_items(self._sanitize_identity(str(local.get("text", ""))), "[DEBUG ANALYSIS]")
@@ -789,6 +796,7 @@ Answer:
             return ["Improve agent is disabled."], "rule"
 
         prompt = self._build_improve_agent_prompt(user_input, debug_result)
+        stage("Improve · proposing improvements")
         local = self._call_local(prompt)
         if local.get("ok"):
             lines = self.parse_section_items(self._sanitize_identity(str(local.get("text", ""))), "[IMPROVEMENTS]")
@@ -808,6 +816,7 @@ Answer:
             return ["Predict agent is disabled."], "rule"
 
         prompt = self._build_predict_agent_prompt(user_input, debug_result, improve_result)
+        stage("Predict · assessing likely outcomes")
         local = self._call_local(prompt)
         if local.get("ok"):
             lines = self.parse_section_items(self._sanitize_identity(str(local.get("text", ""))), "[PREDICTIONS]")
@@ -823,6 +832,7 @@ Answer:
         temperature: float | None = None,
     ) -> dict[str, Any]:
         if not self.config.use_local_llm:
+            stage("Fallback · local model disabled, using available rules")
             METRICS.set_state("circuit_breaker_state", "OPEN")
             return {"ok": False, "text": "", "status_code": None}
 
@@ -843,6 +853,8 @@ Answer:
             retries=self.config.local_llm_retries,
         )
         METRICS.set_state("circuit_breaker_state", "CLOSED" if response.get("ok") else "OPEN")
+        if not response.get("ok"):
+            stage("Fallback · model unavailable, using available rules")
         if self.config.dev_mode:
             print("[DEBUG] Raw response:")
             self._debug_print_safe(str(response.get("text", ""))[:1200] or "<empty>")
@@ -857,6 +869,7 @@ Answer:
         review_cache_key = self._review_cache_key(cleaned_code, language)
         cached_review = self._review_cache_get(review_cache_key)
         if cached_review is not None:
+            stage("Cache · reusing saved review")
             cached_copy = copy.deepcopy(cached_review)
             cached_copy["current_user"] = self.current_user
             statuses = cached_copy.get("system_status", [])
@@ -868,6 +881,7 @@ Answer:
 
         # Guard against oversized payloads that can degrade model quality.
         code_for_prompt = cleaned_code[: self.REVIEW_PROMPT_MAX_CHARS]
+        stage("Context · inspecting related code")
         graph_context = self._build_graph_context(cleaned_code)
         if self.config.dev_mode or self.config.review_logging:
             print("[Code Review -> Using LLM]")
@@ -1071,6 +1085,7 @@ Answer:
             f"Graph Context:\n{graph_context_text}\n\n"
             f"{UNTRUSTED_CODE_RULE}\n{fence_untrusted_code(code_for_prompt)}"
         )
+        stage("Analyzer · finding bugs and risks")
         analyzer_resp = self._call_local(analyzer_prompt, max_new_tokens=350)
         if not analyzer_resp.get("ok"):
             return {
@@ -1095,6 +1110,7 @@ Answer:
             f"Analyzer Notes:\n{analyzer_notes}\n\n"
             f"{UNTRUSTED_CODE_RULE}\n{fence_untrusted_code(code_for_prompt)}"
         )
+        stage("Generator · writing review and code")
         generator_resp = self._call_local(generator_prompt, max_new_tokens=1000)
         if not generator_resp.get("ok"):
             return {
@@ -1118,6 +1134,7 @@ Answer:
                 "Return JSON only: {\"score\": 0.0, \"issues\": [\"...\"]}\n\n"
                 f"{candidate}"
             )
+            stage(f"Critic · checking review quality (pass {loop + 1})")
             critic_resp = self._call_local(critic_prompt, max_new_tokens=220)
             issues_text = ""
             if critic_resp.get("ok"):
@@ -1150,6 +1167,7 @@ Answer:
                 f"Review To Rewrite:\n{candidate}\n\n"
                 f"{UNTRUSTED_CODE_RULE}\n{fence_untrusted_code(code_for_prompt)}"
             )
+            stage(f"Fixer · refining review and code (pass {loop + 1})")
             fixer_resp = self._call_local(fixer_prompt, max_new_tokens=1200)
             if not fixer_resp.get("ok"):
                 break
@@ -1187,6 +1205,7 @@ Answer:
 
         best_candidate = ""
         for token_budget in (900, 1200, 1500):
+            stage(f"Code · generating complete fix ({token_budget} token budget)")
             response = self._call_local(prompt, max_new_tokens=token_budget)
             if not response.get("ok"):
                 continue
@@ -1207,6 +1226,7 @@ Answer:
         return best_candidate
 
     def _continue_fixed_code(self, partial_code: str, original_code: str, language: str) -> str:
+        stage("Code · completing partial output")
         prompt = (
             f"Continue and complete this {language} code so it becomes syntactically valid.\n"
             "Return full corrected code only.\n"
@@ -1223,6 +1243,7 @@ Answer:
         return self._extract_code_candidate(text)
 
     def _repair_invalid_code(self, invalid_code: str, original_code: str, language: str) -> str:
+        stage("Code · repairing syntax")
         prompt = (
             f"Repair syntax errors in this {language} code.\n"
             f"Return only valid {language} code. No markdown.\n"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+import threading
 from pathlib import Path
 
 from textual.widgets import Button, Digits, Input, Markdown, OptionList, Static
@@ -36,12 +37,18 @@ class FakeEngine:
     def status(self) -> SystemStatus:
         return SystemStatus("fake-model", True, True, "GPU", "ready", "auto")
 
-    def chat(self, text: str) -> dict:
+    def chat(self, text: str, *, progress=None) -> dict:
+        if progress:
+            progress("Chat · generating response")
         self.stats.record(0.4, {}, review=False)
         return {"response_mode": "chat", "chat_response": f"**answer** to {text}", "model_name": "fake-model",
                 "elapsed_seconds": 0.4, "analysis_source": "llm", "intent_confidence": 0.9}
 
-    def review(self, target: str, *, for_fix: bool = False) -> dict:
+    def review(self, target: str, *, for_fix: bool = False, progress=None) -> dict:
+        if progress:
+            progress("Analyzer · finding bugs and risks")
+            progress("Generator · writing review and code")
+            progress("Critic · checking review quality (pass 1)")
         self.stats.record(1.5, REVIEW, review=True)
         verb = "fix" if for_fix else "review"
         return dict(REVIEW, current_input=f"{verb} {target}", review_target=target, guardrails=list(self.findings))
@@ -61,6 +68,58 @@ async def submit(pilot, app: TRXApp, text: str) -> None:
 
 
 class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_worker_progress_animates_and_stops_on_completion(self) -> None:
+        release = threading.Event()
+
+        class WaitingEngine(FakeEngine):
+            def chat(self, text, *, progress=None):
+                progress("Chat · generating response")
+                release.wait(timeout=5)
+                return super().chat(text)
+
+        app = TRXApp(engine=WaitingEngine())
+        async with app.run_test(size=(80, 24)) as pilot:
+            try:
+                command = app.query_one("#command", Input)
+                command.value = "hello"
+                await command.action_submit()
+                await pilot.pause()
+                self.assertTrue(app.busy)
+                activity = app.query_one("#activity", Static)
+                self.assertTrue(activity.display)
+                self.assertIn("Chat · generating response", str(activity.render()))
+                frames = set()
+                for _ in range(4):
+                    frames.add(str(app.query_one("#command-hint", Static).render()))
+                    await pilot.pause(0.16)
+                self.assertGreater(len(frames), 1)
+                self.assertFalse(app.query_one("#telemetry").display)
+            finally:
+                release.set()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            self.assertFalse(app.busy)
+            self.assertFalse(activity.display)
+            self.assertIn("Enter submit", str(app.query_one("#command-hint", Static).render()))
+
+    async def test_stage_trace_resets_and_failure_hides_loader(self) -> None:
+        app = TRXApp(engine=FakeEngine())
+        async with app.run_test(size=(140, 40)) as pilot:
+            app._start_busy("review app.py")
+            app._show_progress("Analyzer · finding bugs and risks")
+            app._show_progress("Generator · writing review and code")
+            self.assertIn("Analyzer > Generator", str(app.query_one("#activity", Static).render()))
+            await pilot.press("f3")
+            self.assertIn("Generator", str(app.query_one("#pipeline-text", Static).render()))
+            app._finish_error("Model unavailable")
+            self.assertFalse(app.query_one("#activity").display)
+            app._show_progress("stale callback")
+            self.assertNotIn("stale callback", app._stages)
+            app._start_busy("thinking")
+            self.assertEqual(app._stages, [])
+            self.assertNotIn("Generator", str(app.query_one("#activity", Static).render()))
+            app._finish_error("Cancelled")
+
     async def test_busy_feedback_and_preserved_pending_input(self) -> None:
         app = TRXApp(engine=FakeEngine())
         async with app.run_test(size=(80, 24)) as pilot:
