@@ -17,6 +17,9 @@ dependencies = [
     "watchdog>=4.0",
     "prompt_toolkit>=3.0.43",
     "textual>=1.0",
+    "Pygments>=2.20.0",
+    "pillow>=12.3.0",
+    "urllib3>=2.8.0",
 ]
 
 [project.optional-dependencies]
@@ -31,10 +34,10 @@ trx = "main:main"
 
 [tool.setuptools.package-data]
 tui = ["*.tcss"]
+benchmarks = ["*.jsonl"]
 
 [tool.setuptools]
-# Flat module layout. The app reads sessions/, .env and benchmarks/ relative to the
-# working directory, so use an editable install (`pip install -e .`) from the repo root.
+# Runtime files use the working directory; the benchmark dataset ships in the wheel.
 py-modules = [
     "analyzer",
     "cli_input",
@@ -65,7 +68,7 @@ py-modules = [
     "vector_memory",
     "watcher",
 ]
-packages = ["tui"]
+packages = ["tui", "benchmarks"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

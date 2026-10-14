@@ -51,6 +51,11 @@ jobs:
         run: python -c "from evaluation import load_dataset; cases = load_dataset(); assert len(cases) >= 50, len(cases); print(len(cases), 'cases')"
       - name: Smoke E2E (no LLM)
         run: python smoke_e2e.py --disable-llm --min-score 10
+      - name: Build and smoke-test release wheel
+        if: matrix.python-version == '3.12'
+        run: |
+          python -m pip wheel . --no-deps --wheel-dir build/release
+          python scripts/check_release.py build/release
       - uses: actions/upload-artifact@v4
         if: matrix.python-version == '3.12'
         with:

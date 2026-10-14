@@ -34,7 +34,7 @@ venv/
 Thumbs.db
 
 # Generated fixed files (optional)
-*_fixed.py
+*_fixed.*
 
 # Tool caches
 .ruff_cache/

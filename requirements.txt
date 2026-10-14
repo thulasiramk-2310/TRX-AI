@@ -5,3 +5,7 @@ numpy>=1.26
 watchdog>=4.0
 prompt_toolkit>=3.0.43
 textual>=1.0
+# Security floors for transitive runtime dependencies.
+Pygments>=2.20.0
+pillow>=12.3.0
+urllib3>=2.8.0
