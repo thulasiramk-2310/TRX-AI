@@ -154,6 +154,8 @@ Answers print into a scrolling transcript; the screen is never cleared.
 - **PDF exports** use compact headings, a white page, readable code listings, and automatic
   pagination. Comparison reports use a metrics table and distinguish changed report text from
   verified remediation. Empty sections are omitted and recognized secrets are redacted.
+  IBM Plex Sans and Plex Mono are bundled and embedded, with 11-point body text and aligned
+  numeric columns. The unmodified fonts retain their [Open Font License](report_assets/fonts/LICENSE.txt).
 - The Critic uses constrained JSON. Invalid or unavailable Critic responses are marked unverified,
   without triggering rewrites based on a guessed score. The last review revision is assessed;
   generated code still goes through the separate syntax and safety checks.

@@ -34,6 +34,24 @@ monospace code with line numbers. Long content flows across pages. Comparisons u
 compact table instead of a mixed-scale chart; absent findings are labelled as text
 differences, not confirmed fixes. Exports no longer generate a logo asset.
 
+The PDF type system embeds IBM Plex Sans Regular and SemiBold for body text and headings,
+and IBM Plex Mono for code and numeric table columns. Body text uses 11 points with
+16-point line spacing. White pages, charcoal text, a muted blue accent, consistent margins,
+and right-aligned numeric values keep the reports readable in print.
+
+Design references:
+
+- [IBM Developer typography](https://www.ibm.com/brand/experience-guides/developer/brand/typography/)
+  and [IBM layout guidance](https://www.ibm.com/design/language/layout/tips-and-techniques/).
+- [Practical Typography](https://practicaltypography.com/typography-in-ten-minutes.html)
+  for body size and line spacing.
+- [GOV.UK tables](https://design-system.service.gov.uk/components/table/) for numeric alignment.
+
+Fonts come from the [official IBM Plex repository](https://github.com/IBM/plex) and are
+redistributed unmodified with the Open Font License. The source revision and SHA-256
+checksums are recorded in `report_assets/fonts/sources.json`. Font loading uses packaged
+resources, so installed PDFs need no system font installation or font download.
+
 The classic CLI prints into the terminal's normal scrollback, like a shell. These rules come from public
 feedback on Claude Code, Codex CLI, Gemini CLI and Copilot CLI. Please keep them when you change
 `formatter.py`, `cli_input.py` or the loop in `main.py`.
