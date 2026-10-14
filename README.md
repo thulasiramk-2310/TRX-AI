@@ -149,6 +149,9 @@ Answers print into a scrolling transcript; the screen is never cleared.
 - **Chat answers** render as Markdown, followed by one muted line: model · time · source (`llm`, `built-in knowledge`, or `rule fallback`).
 - **Code reviews** render as plain sections (Issues / Fixes / Performance / Summary) with a confidence score. There are no boxes, so copied text stays clean. See [docs/ui.md](docs/ui.md) for the design rules and the user feedback behind them, and [docs/guardrails.md](docs/guardrails.md) for safety checks (secret redaction, fix vetting, prompt-injection fencing).
 - **Fixes** show as a colored diff against your file (`+added -removed`), or "no code changes suggested". You never get a full copy of an unchanged file.
+  Saving checks that the source still matches the reviewed version; if you edited it, run `fix` again.
+  Script shebangs and Python encoding declarations stay at the top. PHP fixes keep their code intact
+  without adding comments before the opening tag.
 - Reviews longer than 2,500 characters use only the input prefix and explicitly report that limit. Whole-file fixes are withheld for these inputs; review a smaller file or function to generate a fix.
 - **Structured logs** go to `sessions/trx_events.jsonl` instead of the terminal. Set `RD_STRUCTURED_LOGS=stdout` to print them, or `false` to turn them off.
 - **PDF exports** use compact headings, a white page, readable code listings, and automatic

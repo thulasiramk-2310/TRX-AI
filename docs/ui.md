@@ -52,6 +52,11 @@ redistributed unmodified with the Open Font License. The source revision and SHA
 checksums are recorded in `report_assets/fonts/sources.json`. Font loading uses packaged
 resources, so installed PDFs need no system font installation or font download.
 
+The safety inspector resets when each request begins. Chat responses explicitly say that no
+fix-safety checks ran, rather than displaying findings from an earlier review. Ollama model
+telemetry can be unavailable without marking a reachable generation service as offline.
+The TUI retains only the configured context window and filters it by the active user.
+
 The classic CLI prints into the terminal's normal scrollback, like a shell. These rules come from public
 feedback on Claude Code, Codex CLI, Gemini CLI and Copilot CLI. Please keep them when you change
 `formatter.py`, `cli_input.py` or the loop in `main.py`.
