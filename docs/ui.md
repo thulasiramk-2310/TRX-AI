@@ -29,6 +29,11 @@ scrolling CLI described below; piped output also uses the classic CLI.
 
 ## Classic CLI
 
+PDF exports follow the same restrained layout: small header, meaningful sections, and
+monospace code with line numbers. Long content flows across pages. Comparisons use a
+compact table instead of a mixed-scale chart; absent findings are labelled as text
+differences, not confirmed fixes. Exports no longer generate a logo asset.
+
 The classic CLI prints into the terminal's normal scrollback, like a shell. These rules come from public
 feedback on Claude Code, Codex CLI, Gemini CLI and Copilot CLI. Please keep them when you change
 `formatter.py`, `cli_input.py` or the loop in `main.py`.
