@@ -38,7 +38,7 @@ class ProgressTests(unittest.TestCase):
     def test_critic_pass_skips_fixer_and_low_score_runs_it(self):
         analyzer = analyzer_stub()
         for score, expected in ((0.9, ["Analyzer", "Generator", "Critic"]),
-                                (0.1, ["Analyzer", "Generator", "Critic", "Fixer", "Critic", "Fixer"])):
+                                (0.1, ["Analyzer", "Generator", "Critic", "Fixer", "Critic"])):
             events = []
             responses = [
                 {"ok": True, "text": "notes"},

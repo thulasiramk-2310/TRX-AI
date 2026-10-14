@@ -11,6 +11,7 @@ import builtins
 import sys
 import re
 import time
+import math
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,7 @@ from llm_client import call_local_llm  # noqa: F401 - re-exported for existing i
 from guardrails import UNTRUSTED_CODE_RULE, fence_untrusted_code
 from rule_engine import RuleEngine
 from progress import stage
+from offline_review import scan_python
 
 
 
@@ -832,6 +834,7 @@ Answer:
         prompt: str,
         max_new_tokens: int | None = None,
         temperature: float | None = None,
+        response_format: dict[str, Any] | str | None = None,
     ) -> dict[str, Any]:
         if not self.config.use_local_llm:
             stage("Fallback · local model disabled, using available rules")
@@ -841,6 +844,7 @@ Answer:
         if self.config.dev_mode:
             print("[DEBUG] Prompt sent to LLM:")
             self._debug_print_safe(prompt[:1200])
+        format_options = {"response_format": response_format} if response_format is not None else {}
         response = call_local_llm(
             prompt,
             url=self.config.local_llm_url,
@@ -853,6 +857,7 @@ Answer:
                 else max(0.0, min(1.0, float(temperature)))
             ),
             retries=self.config.local_llm_retries,
+            **format_options,
         )
         METRICS.set_state("circuit_breaker_state", "CLOSED" if response.get("ok") else "OPEN")
         if not response.get("ok"):
@@ -1044,7 +1049,15 @@ Answer:
         )
         if weak_parsing:
             status.append("structured_parse_weak")
-        status.append(f"critic_score={pipeline.get('critic_score', 0.0):.2f}")
+        if pipeline.get("critic_available") is False:
+            status.extend(["critic_unavailable", "critic_score=unavailable"])
+            sections["final_summary"] = [
+                "Critic assessment unavailable; review quality is unverified. Inspect the suggestions before saving.",
+                *sections.get("final_summary", []),
+            ]
+            analysis_text = self._compose_code_review_text(sections)
+        else:
+            status.append(f"critic_score={pipeline.get('critic_score', 0.0):.2f}")
         status.append(f"steps={len(pipeline.get('steps', []))}")
 
         return {
@@ -1129,33 +1142,62 @@ Answer:
             truncated = True
 
         critic_score = 0.0
+        critic_available = False
         for loop in range(2):
             critic_prompt = (
                 "You are Critic Agent.\n"
-                "Evaluate this review quality for specificity, section completeness, and actionable fixes.\n"
-                "Return JSON only: {\"score\": 0.0, \"issues\": [\"...\"]}\n\n"
-                f"{candidate}"
+                "Compare the review with the original code. Score from 0 to 1.\n"
+                "Use 0.75 or higher for a specific, correct review with actionable fixes and complete code.\n"
+                "List only concrete mistakes or missing required sections, not stylistic preferences.\n"
+                "Return a JSON object with numeric score and an issues array; keep issues short.\n\n"
+                f"Original code:\n{UNTRUSTED_CODE_RULE}\n{fence_untrusted_code(code_for_prompt)}\n\n"
+                f"Review:\n{candidate}"
             )
             stage(f"Critic · checking review quality (pass {loop + 1})")
-            critic_resp = self._call_local(critic_prompt, max_new_tokens=220)
+            critic_resp = self._call_local(critic_prompt, max_new_tokens=220, temperature=0.0, response_format={
+                "type": "object", "properties": {
+                    "score": {"type": "number", "minimum": 0, "maximum": 1},
+                    "issues": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
+                }, "required": ["score", "issues"], "additionalProperties": False,
+            })
             issues_text = ""
+            critic_available = False
             if critic_resp.get("ok"):
                 critic_payload = str(critic_resp.get("text", "")).strip()
                 match = re.search(r"\{[\s\S]*\}", critic_payload)
                 if match:
                     try:
                         parsed = json.loads(match.group(0))
-                        critic_score = float(parsed.get("score", 0.0))
+                        if not isinstance(parsed, dict):
+                            raise ValueError("Invalid critic object")
+                        score = parsed.get("score")
+                        if not isinstance(score, (int, float)) or isinstance(score, bool) or not math.isfinite(score):
+                            raise ValueError("Invalid critic score")
+                        if not 0 <= score <= 1:
+                            raise ValueError("Critic score must be between zero and one")
+                        critic_score = score
                         issues = parsed.get("issues", [])
-                        if isinstance(issues, list):
-                            issues_text = "\n".join(f"- {str(i)}" for i in issues[:8])
+                        if not isinstance(issues, list) or not all(isinstance(item, str) for item in issues):
+                            raise ValueError("Invalid critic issues")
+                        critic_available = True
+                        issues_text = "\n".join(f"- {i}" for i in issues[:5])
                     except (ValueError, TypeError):
                         critic_score = 0.0
             steps.append(f"critic_{loop+1}")
+            if not critic_available:
+                # A transport/format failure is not evidence that the review is bad.
+                # Preserve the candidate and mark quality unverified rather than
+                # triggering two expensive rewrites from an invented zero score.
+                steps.append("critic_unavailable")
+                break
             if critic_score >= 0.75:
                 break
             if loop == 0 and critic_score >= 0.65:
                 # Avoid extra latency for near-pass quality.
+                break
+            if loop == 1:
+                # Keep the final candidate assessed by the final Critic pass;
+                # another rewrite here would be costly and never re-evaluated.
                 break
 
             fixer_prompt = (
@@ -1183,6 +1225,7 @@ Answer:
             "text": candidate,
             "steps": steps,
             "critic_score": critic_score,
+            "critic_available": critic_available,
             "truncated": truncated,
             "graph_context": graph_context,
         }
@@ -1871,6 +1914,11 @@ IMPORTANT:
         improvements: list[str] = []
         performance: list[str] = []
         security: list[str] = []
+        structural = scan_python(code)
+        code_debug.extend(structural["code_debug"])
+        improvements.extend(structural["code_improvements"])
+        performance.extend(structural["performance"])
+        security.extend(structural["security"])
 
         lines = code.splitlines()
         for idx, line in enumerate(lines, start=1):
@@ -1878,7 +1926,8 @@ IMPORTANT:
             stripped = line.strip()
             if "except:" in line_lower:
                 code_debug.append(f"Line {idx}: bare except hides real failures and complicates debugging.")
-            if re.search(r"\bfor\s+\w+\s+in\s+range\(\s*n\s*\)\s*:", line_lower):
+            if (re.search(r"\bfor\s+\w+\s+in\s+range\(\s*n\s*\)\s*:", line_lower)
+                    and re.search(r"\[\s*\w+\s*\+\s*1\s*\]", code)):
                 code_debug.append(f"Line {idx}: full-range inner loop can cause index errors in adjacent access patterns.")
                 improvements.append(f"Line {idx}: use range(n - i - 1) for bubble-sort style loops.")
                 performance.append(f"Line {idx}: reduce unnecessary iterations by shrinking loop bounds.")
