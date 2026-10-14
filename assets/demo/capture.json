@@ -1,0 +1,22 @@
+{
+  "captured_at": "2026-10-14T17:19:48.786237+00:00",
+  "model": "qwen3:8b",
+  "elapsed_seconds": 117.08775059999971,
+  "original": "# Intentionally incorrect sample for the README's review/fix walkthrough.\ndef find_max(values):\n    return values[0]\n",
+  "fixed": "def find_max(values):\n    if not isinstance(values, list):\n        raise TypeError(\"Input must be a list.\")\n    if len(values) == 0:\n        raise ValueError(\"Input list cannot be empty.\")\n    return max(values)",
+  "output": "examples\\find_max_fixed.py",
+  "original_preserved": true,
+  "stages": [
+    "Context \u00b7 inspecting related code",
+    "Analyzer \u00b7 finding bugs and risks",
+    "Generator \u00b7 writing review and code",
+    "Critic \u00b7 checking review quality (pass 1)",
+    "Code \u00b7 repairing syntax"
+  ],
+  "verification": {
+    "nonempty_max": true,
+    "negative_max": true,
+    "single_item": true,
+    "empty_rejected": true
+  }
+}

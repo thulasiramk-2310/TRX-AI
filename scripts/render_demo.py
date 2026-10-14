@@ -1,12 +1,13 @@
-"""Render the README motion demo from the real Textual UI and labelled sample data.
+"""Render a concrete README walkthrough from actual local-model TUI captures.
 
 Developer tooling only: requires ffmpeg, svglib, rl-renderPM, and project dependencies.
-No model calls, session writes, generated fixes, or desktop recording are involved.
+Run capture_demo.py first to record real inference and fix saving in an isolated workspace.
+This editing step contacts no services and only reads those recorded screenshots.
 """
 
 from __future__ import annotations
 
-import asyncio
+import json
 from functools import lru_cache
 import os
 from pathlib import Path
@@ -21,29 +22,16 @@ from PIL import Image, ImageDraw, ImageFont
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from tui.app import TRXApp  # noqa: E402
-from tui.demo import DEMO_STATUS  # noqa: E402
-from tui.engine import SessionStats  # noqa: E402
 
 BUILD = ROOT / "build" / "demo"
 OUTPUT = ROOT / "assets" / "demo"
 FONTS = ROOT / "report_assets" / "fonts"
-WIDTH, HEIGHT, FPS, DURATION = 1280, 720, 30, 26
+WIDTH, HEIGHT, FPS, DURATION = 1280, 720, 30, 38
 PAPER = "#ECEAE3"
 INK = "#222830"
 MUTED = "#626A71"
 ACCENT = "#455E7A"
-ORIGINAL = "def find_max(values):\n    return values[0]\n"
-FIXED = 'def find_max(values):\n    if not values:\n        raise ValueError("empty list")\n    return max(values)\n'
-
-
-class DemoEngine:
-    """Only supplies status for screenshots; no production services are called."""
-
-    stats = SessionStats()
-
-    def status(self):
-        return DEMO_STATUS
+CAPTURE = {}
 
 
 def rasterize(path: Path) -> Image.Image:
@@ -83,50 +71,20 @@ def rasterize(path: Path) -> Image.Image:
         return image.convert("RGB")
 
 
-async def capture() -> dict[str, Image.Image]:
-    images = {}
-    app = TRXApp(engine=DemoEngine())
-    app.workspace_name = "trx-ai"
-    async with app.run_test(size=(124, 32)) as pilot:
-        await pilot.pause()
-
-        async def shot(name):
-            await pilot.pause()
-            path = Path(app.save_screenshot(filename=name + ".svg", path=str(BUILD)))
-            images[name] = rasterize(path)
-
-        await shot("ready")
-        command = app.query_one("#command")
-        text = "fix examples/find_max.py"
-        for index in range(1, 9):
-            command.value = text[:round(len(text) * index / 8)]
-            await shot(f"typing-{index}")
-        command.value = ""
-        app._add_user(text)
-        app._start_busy(text)
-        await pilot.press("f3")
-        for index, label in enumerate(("Reading · loading code", "Analyzer · finding bugs and risks",
-                                       "Generator · writing review and code", "Critic · checking review quality (pass 1)")):
-            app._show_progress(label)
-            await shot(f"stage-{index}")
-        await pilot.press("f3")
-        result = {
-            "response_mode": "analysis", "current_input": text,
-            "review_target": "examples/find_max.py", "model_name": "qwen3:8b",
-            "analysis_source": "llm", "debug_analysis": [
-                "Empty input raises IndexError.", "The first value is not necessarily the maximum."],
-            "improvements": ["Reject empty input explicitly; use max(values)."],
-            "original_code": ORIGINAL, "fixed_code": FIXED,
-            "system_status": ["steps=3", "critic_score=unavailable"], "guardrails": [],
-        }
-        app.show_result(result)
-        await shot("review")
-        app.query_one("#stream").scroll_end(animate=False)
-        await shot("patch")
-        app._confirm_fix(result)
-        await shot("confirm")
-        await pilot.press("escape")
-    return images
+def load_capture():
+    record = json.loads((BUILD / "live-capture.json").read_text(encoding="utf-8"))
+    if not record.get("original_preserved") or not record.get("fixed") or not all(
+            record.get("verification", {}).get(key) for key in
+            ("nonempty_max", "negative_max", "single_item", "empty_rejected")):
+        raise ValueError("A successful live capture is required. Run scripts/capture_demo.py first.")
+    images = {name: rasterize(BUILD / path) for name, path in record["screenshots"].items()}
+    stages = record["stages"]
+    if not stages:
+        raise ValueError("No live progress screenshots were captured.")
+    for index in range(4):
+        selected = round(index * (len(stages) - 1) / 3)
+        images[f"stage-{index}"] = images[f"live-stage-{selected}"]
+    return images, record
 
 
 @lru_cache(maxsize=32)
@@ -161,7 +119,7 @@ def screen_frame(image: Image.Image, caption: str, step: str, zoom=1.0, focus=(0
     draw.rounded_rectangle((55, 87, 1225, 607), radius=10, fill="#D4D4CD")
     frame.paste(camera(image, zoom, focus), (60, 91))
     draw.text((60, 627), caption, font=font(29, bold=True), fill=INK)
-    draw.text((60, 681), "ILLUSTRATIVE UI DEMO  /  EDITED PACING", font=font(11, mono=True), fill=MUTED)
+    draw.text((60, 681), "LIVE QWEN3 CAPTURE  /  WAITING SHORTENED", font=font(11, mono=True), fill=MUTED)
     return frame
 
 
@@ -184,28 +142,61 @@ def title_frame(t: float, *, closing=False):
     return frame
 
 
+def code_frame(*, after=False):
+    frame = Image.new("RGB", (WIDTH, HEIGHT), PAPER)
+    draw = ImageDraw.Draw(frame)
+    draw.text((80, 42), "TRX AI  /  BROKEN CODE TO A SAVED FIX", font=font(17, mono=True), fill=MUTED)
+    draw.text((80, 105), "The result: a maximum, not the first item." if after else
+              "This function doesn't find the maximum.", font=font(41, bold=True), fill=INK)
+    draw.rounded_rectangle((80, 188, 829, 552), radius=8, fill="#15191E")
+    filename = "examples/find_max_fixed.py" if after else "examples/find_max.py"
+    draw.text((101, 207), filename, font=font(17, mono=True), fill="#A8BACD")
+    code = CAPTURE["fixed"] if after else CAPTURE["original"]
+    lines = [line for line in code.splitlines() if not line.startswith("#")]
+    for index, line in enumerate(lines):
+        draw.text((101, 257 + index * 34), line, font=font(19, mono=True), fill="#E1E6EC")
+    draw.text((874, 212), "EXAMPLE", font=font(17, mono=True), fill=MUTED)
+    draw.text((874, 261), "[3, 1, 9]", font=font(25, mono=True), fill=INK)
+    draw.text((874, 316), "returns 9" if after else "returns 3", font=font(29, bold=True), fill=INK)
+    draw.text((874, 365), "Correct maximum." if after else "Expected: 9", font=font(22), fill=ACCENT)
+    draw.text((874, 427), "Empty input:", font=font(21), fill=MUTED)
+    draw.text((874, 464), "ValueError" if after else "IndexError", font=font(24, mono=True), fill=INK)
+    draw.text((80, 600), "Saved a separate copy. Original unchanged." if after else
+              "Ask TRX to review the file and suggest a fix.", font=font(29, bold=True), fill=INK)
+    draw.text((80, 678), "ACTUAL CAPTURED SOURCE AND GENERATED CODE", font=font(11, mono=True), fill=MUTED)
+    return frame
+
+
 def render_frame(t: float, images):
-    if t < 2.7:
+    if t < 2:
         return title_frame(t)
-    if t < 6.8:
-        local = t - 2.7
+    if t < 7:
+        return code_frame()
+    if t < 10.5:
+        local = t - 7
         key = "ready" if local < 0.6 else f"typing-{min(8, max(1, int((local - 0.6) * 3) + 1))}"
         zoom = 1 + 0.55 * ease((local - 0.3) / 1.8)
-        return screen_frame(images[key], "Start with a file.", "01 / REQUEST", zoom, (0.25, 0.92))
-    if t < 12.2:
-        local = t - 6.8
-        index = min(3, int(local / 1.35))
+        return screen_frame(images[key], "Request a fix for this file.", "01 / REQUEST", zoom, (0.25, 0.92))
+    if t < 15.5:
+        local = t - 10.5
+        index = min(3, int(local / 1.25))
         zoom = 1.05 + 0.8 * ease(local / 2)
-        return screen_frame(images[f"stage-{index}"], "Follow each review stage.", "02 / REVIEW", zoom, (0.91, 0.62))
-    if t < 18.4:
-        local = t - 12.2
-        image = images["review"] if local < 2.8 else images["patch"]
-        focus_y = 0.46 + 0.06 * ease((local - 2) / 2.5)
-        return screen_frame(image, "Read the finding. Inspect the change.", "03 / DIFF", 1.24, (0.51, focus_y))
-    if t < 22.4:
-        local = t - 18.4
+        return screen_frame(images[f"stage-{index}"],
+                            f"Real Qwen3 review: {CAPTURE['elapsed_seconds']:.0f}s. Waiting shortened.",
+                            "02 / LIVE REVIEW", zoom, (0.91, 0.62))
+    if t < 20.5:
+        return screen_frame(images["review"], "TRX identifies the incorrect return and empty-input crash.",
+                            "03 / FINDINGS", 1.15, (0.51, 0.32))
+    if t < 25.5:
+        return screen_frame(images["patch"], "Inspect the actual generated change.", "04 / DIFF", 1.18, (0.51, 0.62))
+    if t < 28.5:
+        local = t - 25.5
         zoom = 1.25 + 0.2 * ease(local / 2)
-        return screen_frame(images["confirm"], "You decide when to save.", "04 / CONFIRM", zoom, (0.5, 0.5))
+        return screen_frame(images["confirm"], "Confirm before TRX saves the copy.", "05 / CONFIRM", zoom, (0.5, 0.5))
+    if t < 31.5:
+        return screen_frame(images["saved"], "Saved: examples/find_max_fixed.py", "06 / SAVED", 1.18, (0.51, 0.84))
+    if t < 35.5:
+        return code_frame(after=True)
     return title_frame(t, closing=True)
 
 
@@ -217,7 +208,11 @@ def main():
     os.environ.pop("NO_COLOR", None)
     BUILD.mkdir(parents=True, exist_ok=True)
     OUTPUT.mkdir(parents=True, exist_ok=True)
-    images = asyncio.run(capture())
+    global CAPTURE
+    images, CAPTURE = load_capture()
+    keys = ("captured_at", "model", "elapsed_seconds", "original", "fixed", "output",
+            "original_preserved", "stages", "verification")
+    (OUTPUT / "capture.json").write_text(json.dumps({key: CAPTURE[key] for key in keys}, indent=2), encoding="utf-8")
     mp4 = OUTPUT / "trx-demo.mp4"
     command = [ffmpeg, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
                "-s", f"{WIDTH}x{HEIGHT}", "-r", str(FPS), "-i", "-", "-an", "-c:v", "libx264",
@@ -228,7 +223,7 @@ def main():
             t = index / FPS
             frame = render_frame(t, images)
             # Brief dissolves soften scene changes without obscuring the reading holds.
-            for boundary in (2.7, 6.8, 12.2, 18.4, 22.4):
+            for boundary in (2, 7, 10.5, 15.5, 20.5, 25.5, 28.5, 31.5, 35.5):
                 if boundary <= t < boundary + 0.3:
                     frame = Image.blend(render_frame(boundary - 0.001, images), frame,
                                         ease((t - boundary) / 0.3))
@@ -246,8 +241,8 @@ def main():
     subprocess.run([ffmpeg, "-y", "-loglevel", "error", "-i", str(mp4), "-i", str(palette),
                     "-lavfi", "fps=10,scale=800:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=3",
                     "-loop", "0", str(OUTPUT / "trx-demo.gif")], check=True)
-    render_frame(15, images).save(OUTPUT / "trx-demo-poster.png")
-    for t in (1.5, 5, 9.5, 15, 20, 24):
+    render_frame(23, images).save(OUTPUT / "trx-demo-poster.png")
+    for t in (1, 4, 9, 13, 18, 23, 27, 30, 33, 37):
         render_frame(t, images).save(BUILD / f"qa-{t:g}.png")
     print(f"Demo assets saved to {OUTPUT}", flush=True)
 
