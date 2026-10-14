@@ -1,8 +1,9 @@
 # Guardrails
 
 TRX sends your code to an LLM and can write files based on what the model says. `guardrails.py`
-sits between the model and your files, terminal and storage. All of it runs locally; nothing calls
-an external service.
+sits between the model and your files, terminal and storage. Guardrail checks run locally.
+Inference uses your configured model endpoint. Optional Supabase sync and remote graph
+queries contact their configured services when explicitly enabled.
 
 | Risk | Guardrail | Where |
 |---|---|---|
@@ -13,6 +14,12 @@ an external service.
 
 Existing protections that are still in place:
 - Fixes are written to a separate `<name>_fixed.<ext>` file. The original file is never overwritten.
+  Writes replace the output atomically. Linked destinations are rejected, and model explanations
+  are flattened into comments so they cannot inject executable lines into the change header.
+- Prompt history and PDF exports mask recognized secrets. Routing memory stores prompt
+  fingerprints. Report paths must stay within `reports/`.
+- User profiles scope local memory; switching profiles is not an authentication boundary
+  against another person with access to the same OS account or runtime files.
 - Review targets are limited to an allowlist of file types, a maximum size, and excluded folders
   (`venv`, `.git`, …).
 

@@ -275,6 +275,9 @@ accent; the terminal controls the font (Cascadia Code and JetBrains Mono both wo
 
 ## Project Structure
 
+The [14 October 2026 audit](docs/audit-2026-10-14.md) records verified behavior,
+security fixes, release checks, and remaining validation limits.
+
 ```text
 chatcli/
 |-- main.py              # CLI entry point (`trx`)
