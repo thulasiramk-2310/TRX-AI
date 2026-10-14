@@ -27,6 +27,101 @@ SECRET = "ghp_" + "z" * 36
 
 
 class AuditRegressionTests(unittest.TestCase):
+    def test_saved_fix_preserves_interpreter_and_encoding_preambles(self):
+        cases = [
+            ("sample.py", "#!/usr/bin/env python3\n# coding: utf-8\nprint('héllo')\n", 2),
+            ("sample.js", "#!/usr/bin/env node\nconsole.log('hello');\n", 1),
+            ("sample.php", "<?php\necho 'hello';\n", 2),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, code, count in cases:
+                with self.subTest(name=name):
+                    source = Path(tmp) / name
+                    source.write_text(code, encoding="utf-8")
+                    output = apply_code_fix(str(source), code, original_code=code)
+                    saved = output.read_text(encoding="utf-8")
+                    self.assertEqual(saved.splitlines()[:count], code.splitlines()[:count])
+                    if name.endswith(".php"):
+                        self.assertEqual(saved, code)
+                    elif name.endswith(".py"):
+                        ast.parse(saved)
+
+    def test_stale_fix_preserves_source_and_existing_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "sample.py"
+            source.write_text("x = 3\n", encoding="utf-8")
+            destination = source.with_name("sample_fixed.py")
+            destination.write_text("previous output\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Source changed"):
+                apply_code_fix(str(source), "x = 2\n", original_code="x = 1\n")
+            self.assertEqual(source.read_text(encoding="utf-8"), "x = 3\n")
+            self.assertEqual(destination.read_text(encoding="utf-8"), "previous output\n")
+            self.assertEqual(list(Path(tmp).glob(".trx-fix-*")), [])
+
+    def test_source_change_during_fix_preparation_cleans_temporary_output(self):
+        import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "sample.py"
+            source.write_text("x = 1\n", encoding="utf-8")
+            build_header = main._build_fix_comment_header
+
+            def edit_source(**kwargs):
+                source.write_text("x = 3\n", encoding="utf-8")
+                return build_header(**kwargs)
+
+            with patch("main._build_fix_comment_header", side_effect=edit_source), \
+                    self.assertRaisesRegex(ValueError, "Source changed"):
+                apply_code_fix(str(source), "x = 2\n", original_code="x = 1\n")
+            self.assertFalse(source.with_name("sample_fixed.py").exists())
+            self.assertEqual(list(Path(tmp).glob(".trx-fix-*")), [])
+
+    def test_matching_review_snapshot_saves_normally(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "sample.py"
+            source.write_text("x = 1\n", encoding="utf-8")
+            output = apply_code_fix(str(source), "x = 2\n", original_code="x = 1\n")
+            self.assertTrue(output.read_text(encoding="utf-8").endswith("x = 2\n"))
+            self.assertEqual(source.read_text(encoding="utf-8"), "x = 1\n")
+
+    def test_status_keeps_model_reachable_when_telemetry_is_malformed(self):
+        engine = Engine(analyzer=MagicMock(), config=AppConfig(use_local_llm=True))
+        for payload in (None, [], {"models": None}, {"models": [None]},
+                        {"models": [{"size_vram": "invalid"}]}, {"models": [{"size_vram": None}]}):
+            with self.subTest(payload=payload):
+                tags, telemetry = MagicMock(), MagicMock()
+                tags.ok = True
+                telemetry.json.return_value = payload
+                with patch("tui.engine.requests.get", side_effect=[tags, telemetry]):
+                    status = engine.status()
+                self.assertTrue(status.llm_reachable)
+                self.assertEqual(status.compute, "idle")
+
+    def test_tui_context_is_bounded_and_respects_user_isolation(self):
+        analyzer = MagicMock()
+        analyzer.current_user = "alice"
+        analyzer.analyze.side_effect = lambda *args, **kwargs: {"response_mode": "chat"}
+        engine = Engine(analyzer=analyzer, config=AppConfig(context_window_size=2))
+        with patch.object(engine._main, "_append_run_history"):
+            for text in ("first", "second", "third", "fourth"):
+                engine.chat(text)
+            self.assertEqual([entry["input"] for entry in engine.context], ["third", "fourth"])
+            self.assertEqual([entry["input"] for entry in analyzer.analyze.call_args.kwargs["past_context"]],
+                             ["second", "third"])
+            analyzer.current_user = "bob"
+            engine.chat("new user")
+            self.assertEqual(analyzer.analyze.call_args.kwargs["past_context"], [])
+
+    def test_tui_fix_rejects_empty_source_before_inference(self):
+        analyzer = MagicMock()
+        engine = Engine(analyzer=analyzer, config=AppConfig())
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "sample.py"
+            source.write_text(" \n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Empty file"):
+                engine.review(str(source), for_fix=True)
+        analyzer.analyze_code_multi_agent.assert_not_called()
+
     def test_fix_comment_reason_cannot_inject_executable_statements(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "sample.py"

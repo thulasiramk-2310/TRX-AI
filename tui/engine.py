@@ -74,11 +74,19 @@ class Engine:
         if self.config.use_local_llm:
             try:
                 reachable = requests.get(f"{base}/api/tags", timeout=1.5).ok
-                loaded = requests.get(f"{base}/api/ps", timeout=1.5).json().get("models", [])
-                if loaded:
-                    compute = "GPU" if any(int(m.get("size_vram", 0)) > 0 for m in loaded) else "CPU"
-            except (requests.RequestException, ValueError):
-                reachable = False
+            except requests.RequestException:
+                pass
+            if reachable:
+                try:
+                    response = requests.get(f"{base}/api/ps", timeout=1.5)
+                    response.raise_for_status()
+                    payload = response.json()
+                    loaded = payload.get("models", []) if isinstance(payload, dict) else []
+                    if isinstance(loaded, list) and loaded and all(isinstance(m, dict) for m in loaded):
+                        compute = "GPU" if any(float(m.get("size_vram", 0)) > 0 for m in loaded) else "CPU"
+                except (requests.RequestException, ValueError, TypeError, OverflowError):
+                    # Model telemetry may be unavailable while generation is healthy.
+                    pass
         try:
             graph_status = self._main.detect_mcp_graph_status()
             graph = "ready" if graph_status.exists and graph_status.state == "ready" else (
@@ -102,12 +110,13 @@ class Engine:
         started = time.perf_counter()
         owner = getattr(self.analyzer, "current_user", "guest")
         context = [entry for entry in self.context if entry.get("owner", "guest") == owner]
-        result = self.analyzer.analyze(text, mode="debug", past_context=context[-3:])
+        limit = max(1, self.config.context_window_size)
+        result = self.analyzer.analyze(text, mode="debug", past_context=context[-limit:])
         elapsed = time.perf_counter() - started
         result.setdefault("elapsed_seconds", elapsed)
         result.setdefault("model_name", self.config.local_llm_model)
         result["current_input"] = text
-        self.context.append({"input": text, "owner": owner})
+        self.context = (self.context + [{"input": text, "owner": owner}])[-limit:]
         self.stats.record(elapsed, result, review=result.get("response_mode") == "analysis")
         self._main._append_run_history(text, "chat", result)
         return result
@@ -127,6 +136,8 @@ class Engine:
             if path.suffix.lower() not in self._main.SUPPORTED_CODE_SUFFIXES:
                 raise ValueError("Unsupported code file format.")
             code = path.read_text(encoding="utf-8")
+            if not code.strip():
+                raise ValueError(f"Empty file: {path}")
         else:
             code = self._main._load_review_target(target, config=self.config)
         result = self.analyzer.analyze_code_multi_agent(code)

@@ -7,6 +7,7 @@ import argparse
 import difflib
 import json
 import os
+import re
 import sys
 import textwrap
 import time
@@ -960,21 +961,38 @@ def apply_code_fix(
     destination = source.with_name(f"{source.stem}_fixed{source.suffix or '.txt'}")
     if destination.is_symlink() or (destination.exists() and destination.samefile(source)):
         raise ValueError("Fixed output must not be a link to another file or to the original.")
-    base_original = original_code if original_code is not None else source.read_text(encoding="utf-8")
+    current_code = source.read_text(encoding="utf-8")
+    if original_code is not None and current_code != original_code:
+        raise ValueError("Source changed since the review. Run fix again before saving.")
+    base_original = current_code
     comment_header = _build_fix_comment_header(
         destination_path=destination,
         original_code=base_original,
         fixed_code=fixed_code,
         reason=reason,
     )
+    # Keep interpreter directives and Python encoding declarations at the top.
+    # Comments before PHP's opening tag would become visible response content.
+    if source.suffix.lower() == ".php":
+        saved_code = fixed_code
+    else:
+        lines = fixed_code.splitlines(keepends=True)
+        preamble = 1 if lines and lines[0].startswith("#!") else 0
+        if source.suffix.lower() == ".py":
+            for index, text in enumerate(lines[:2]):
+                if re.match(r"^[ \t\f]*#.*?coding[:=][ \t]*[-\w.]+", text):
+                    preamble = index + 1
+        saved_code = "".join(lines[:preamble]) + comment_header + "".join(lines[preamble:])
     temporary_path = None
     try:
         with NamedTemporaryFile("w", encoding="utf-8", dir=destination.parent, prefix=".trx-fix-",
                                 suffix=".tmp", delete=False) as handle:
             temporary_path = Path(handle.name)
-            handle.write(comment_header + fixed_code)
+            handle.write(saved_code)
         # Replace the directory entry, rather than following a link swapped in
         # after the check above. Failed writes leave the previous output intact.
+        if source.read_text(encoding="utf-8") != base_original:
+            raise ValueError("Source changed while preparing the fix. Run fix again before saving.")
         os.replace(temporary_path, destination)
     finally:
         if temporary_path is not None and temporary_path.exists():

@@ -484,6 +484,8 @@ class TRXApp(App):
             self.query_one("#guard-text", Static).update(
                 "No findings from available checks." if "guardrails" in result else
                 "No fix-safety checks performed for this request.")
+        else:
+            self.query_one("#guard-text", Static).update("No fix-safety checks performed for this request.")
 
     def _update_session(self) -> None:
         stats = getattr(self.engine, "stats", None)
@@ -521,6 +523,7 @@ class TRXApp(App):
         self._refresh_command_hint()
         self.query_one("#pipeline-text", Static).update(Text.assemble(("◐ ", "yellow"), "working: ", (label, "bold")))
         self.query_one("#pipeline-bar", ProgressBar).update(total=None)
+        self.query_one("#guard-text", Static).update("Checks pending for this request.")
 
     def _finish_error(self, message: str) -> None:
         self.busy = False
@@ -528,6 +531,7 @@ class TRXApp(App):
         self._refresh_command_hint()
         self.query_one("#pipeline-text", Static).update("[red]✗[/] failed")
         self.query_one("#pipeline-bar", ProgressBar).update(total=1, progress=0)
+        self.query_one("#guard-text", Static).update("Checks incomplete for this request.")
         self._note(message, "error")
 
     def _refresh_command_hint(self) -> None:

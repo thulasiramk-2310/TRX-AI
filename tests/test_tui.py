@@ -68,6 +68,21 @@ async def submit(pilot, app: TRXApp, text: str) -> None:
 
 
 class FullScreenAppTests(unittest.IsolatedAsyncioTestCase):
+    async def test_safety_inspector_resets_between_review_and_chat(self) -> None:
+        engine = FakeEngine(findings=[Finding("block", "Fix introduces eval()")])
+        app = TRXApp(engine=engine)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await submit(pilot, app, "review app.py")
+            guard = app.query_one("#guard-text", Static)
+            self.assertIn("eval()", str(guard.render()))
+            app._start_busy("thinking")
+            self.assertIn("pending", str(guard.render()))
+            app._finish_error("test reset")
+            self.assertIn("incomplete", str(guard.render()))
+            await submit(pilot, app, "hello")
+            self.assertNotIn("eval()", str(guard.render()))
+            self.assertIn("No fix-safety checks", str(guard.render()))
+
     async def test_live_worker_progress_animates_and_stops_on_completion(self) -> None:
         release = threading.Event()
 
