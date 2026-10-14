@@ -6,14 +6,16 @@ TRX-AI is a CLI-first, hybrid AI assistant for structured debugging, code review
 
 Built for real engineering loops: fast intent routing, multi-agent review, structured output, observability, and deterministic runtime behavior.
 
-## See TRX in motion
+## Watch TRX fix a concrete bug
 
-[![TRX demo: enter a fix request, follow review stages, inspect the diff, and confirm saving](assets/demo/trx-demo.gif)](assets/demo/trx-demo.mp4)
+[![TRX demo: broken maximum function, real Qwen3 review, generated diff, and saved fix](assets/demo/trx-demo.gif)](assets/demo/trx-demo.mp4)
 
-[Watch the full 26-second demo](assets/demo/trx-demo.mp4) · [Static preview](assets/demo/trx-demo-poster.png)
+[Watch the full 38-second demo](assets/demo/trx-demo.mp4) · [Static preview](assets/demo/trx-demo-poster.png)
 
-Real TUI rendering with illustrative responses and edited pacing. The demo shows the workflow;
-it is not a model-speed benchmark. [Demo source and rendering instructions](docs/demo.md).
+`find_max([3, 1, 9])` incorrectly returns `3`. The demo shows the broken source, an actual local
+Qwen3 review, the generated diff, save confirmation, and the fixed copy returning `9`.
+The original stays unchanged. The real review took about 117 seconds; waiting is shortened in
+the video. [Capture details and rendering instructions](docs/demo.md).
 
 ---
 
